@@ -2,7 +2,7 @@
 
 A [DeepSeek Harness](https://github.com/deepseek-ai) plugin that connects to a
 **NebulaGraph 5.0** server and executes nGQL queries, in the spirit of the
-`ngql` console from [nebula-ng-tools](https://github.com/vesoft-inc/nebula-ng-tools).
+`ngql` console tool.
 
 The plugin speaks the native NebulaGraph 5.0 wire protocol (gRPC +
 `nebula.proto.graph.GraphService`) with a **pure-JS client** — no native
