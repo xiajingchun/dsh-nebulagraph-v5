@@ -19,6 +19,11 @@ an ngql-style ASCII table render.
   records, vertices, edges, paths, embedding vectors, geography, `Any`-typed
   columns, const vectors, and null bitmaps.
 - ngql-compatible value rendering (`(id@type:labels{props})`,
+- **Interactive graph rendering (Web Client)**: when a query result contains
+  nodes, edges, or paths, `nebula_execute` projects a replayable graph payload
+  into the tool-result meta and the bundled Web Client plugin renders it as an
+  interactive [AntV G6](https://g6.antv.antgroup.com/) graph (drag / zoom /
+  hover), alongside the normal table output.
   `(src)-[rank@type:labels{props}]->(dst)`, `2019-01-01T12:34:56.123456`,
   durations as `P1Y2M3DT4H5M6.123456S`, …) and an ASCII table output.
 - `USE graph` and other session-state statements persist per `connectionId`.
