@@ -11,6 +11,8 @@ import type { JsonValue } from '@deepseek-ai/dsh-tools'
 import { NebulaClient } from './client.ts'
 import type { NebulaExecuteResult } from './client.ts'
 import { formatValue, renderTable } from './format.ts'
+import { extractGraphData } from './graphData.ts'
+import type { GraphProjection } from './graphData.ts'
 import type { ConnectionRegistry } from './registry.ts'
 
 /** Defaults used when a tool argument is omitted. */
@@ -191,6 +193,14 @@ export function applyNebulaTools(
         },
       },
       render: (_args, value) => [{ type: 'text', text: formatExecuteOutput(value as never) }],
+      // Replayable graph projection: the Web Client renders an interactive
+      // AntV G6 graph from this meta when the result contains nodes/edges.
+      presentationMeta: (_args, value) => {
+        const graph = extractGraphData((value as { rows?: unknown[][] }).rows)
+        // Projection objects are plain JSON; the interface cast keeps the
+        // host schema honest at the meta boundary.
+        return (graph === undefined ? {} : { graph }) as unknown as JsonValue
+      },
     },
     async execute(args, exec) {
       const entry = registry.get(args.connectionId)
