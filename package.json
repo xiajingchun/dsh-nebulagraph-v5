@@ -1,0 +1,89 @@
+{
+  "name": "dsh-nebula",
+  "version": "0.1.0",
+  "description": "DSH plugin: connect to a NebulaGraph 5.0 server and execute GQL queries, returning results as structured rows plus an ngql-style table render. Bundles the gql-query-generator skill.",
+  "keywords": [
+    "dsh",
+    "deepseek-harness",
+    "plugin",
+    "nebulagraph",
+    "nebula",
+    "gql",
+    "ngql",
+    "graph-database",
+    "skill"
+  ],
+  "type": "module",
+  "main": "lib/index.js",
+  "types": "lib/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./lib/index.d.ts",
+      "default": "./lib/index.js"
+    },
+    "./client": {
+      "types": "./lib/client.d.ts",
+      "default": "./lib/client.js"
+    },
+    "./skill": {
+      "types": "./lib/skill.d.ts",
+      "default": "./lib/skill.js"
+    },
+    "./format": {
+      "types": "./lib/format.d.ts",
+      "default": "./lib/format.js"
+    },
+    "./decode": {
+      "types": "./lib/decode/index.d.ts",
+      "default": "./lib/decode/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "files": [
+    "lib",
+    "gql-query-generator",
+    "cordis.patch.yml",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "prebuild": "node scripts/copy-proto.mjs",
+    "build": "rm -rf lib && tsc -p tsconfig.build.json && node scripts/copy-proto.mjs",
+    "pretest": "node scripts/copy-proto.mjs",
+    "typecheck": "tsc --noEmit",
+    "test": "node --import tsx --test tests/*.test.ts",
+    "prepublishOnly": "pnpm build && pnpm test",
+    "prepare": "pnpm build"
+  },
+  "license": "MIT",
+  "publishConfig": {
+    "access": "public"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.1",
+    "@deepseek-ai/dsh-skill": "^0.1.0-rc.5",
+    "@deepseek-ai/dsh-tools": "^0.1.0-rc.5"
+  },
+  "dependencies": {
+    "@grpc/grpc-js": "^1.12.0",
+    "@grpc/proto-loader": "^0.7.13",
+    "protobufjs": "^7.6.5",
+    "schemastery": "^3.18.0"
+  },
+  "devDependencies": {
+    "@deepseek-ai/cordis": "^4.0.1",
+    "@deepseek-ai/dsh-skill": "^0.1.0-rc.6",
+    "@deepseek-ai/dsh-tools": "^0.1.0-rc.6",
+    "@types/node": "^24.0.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.9.0"
+  }
+}

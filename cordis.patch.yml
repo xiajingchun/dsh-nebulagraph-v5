@@ -1,0 +1,13 @@
+# dsh-nebula bundle patch
+#
+# Installed as a bundle (dsh.bundle.patch): `dsh plugin --profile <name> add
+# dsh-nebula` appends the package to the profile's bundle stack and this file
+# inserts the plugin row. You can also mount it manually from a profile's
+# cordis.patch.yml with an equivalent insert:
+#
+#   - insert:
+#       - id: nebula
+#         name: 'dsh-nebula'
+- insert:
+    - id: nebula
+      name: 'dsh-nebula'

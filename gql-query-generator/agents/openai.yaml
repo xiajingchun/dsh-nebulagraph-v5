@@ -1,0 +1,4 @@
+interface:
+  display_name: "GQL Query Generator"
+  short_description: "Generate and migrate NebulaGraph 5.3 GQL queries"
+  default_prompt: "Use $gql-query-generator to turn this requirement into a NebulaGraph 5.3 GQL query."
