@@ -5,8 +5,8 @@
  */
 
 import { randomUUID } from 'node:crypto'
-import { NebulaClient } from './client.ts'
-import type { NebulaConnectOptions } from './client.ts'
+import { NebulaClient } from './nebula-client.ts'
+import type { NebulaConnectOptions } from './nebula-client.ts'
 
 /** One registered connection. */
 export interface ConnectionEntry {

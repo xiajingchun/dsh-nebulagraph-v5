@@ -22,8 +22,11 @@
       "default": "./lib/index.js"
     },
     "./client": {
-      "types": "./lib/client.d.ts",
       "default": "./lib/client.js"
+    },
+    "./nebula-client": {
+      "types": "./lib/nebula-client.d.ts",
+      "default": "./lib/nebula-client.js"
     },
     "./skill": {
       "types": "./lib/skill.d.ts",

@@ -767,10 +767,15 @@ function decodePath(ctx: DecodeContext, vector: NestedVectorLike, index: number,
 
   for (let i = 0; i < totalNum; i++) {
     const pair = sentinelPair
+    const elementVector = vector.nested_vectors[pair.cur]
     if (sentinelType === ColumnType.Node) {
-      elements[i] = decodeNode(ctx, vector.nested_vectors[pair.cur], sentinelOffset, { kind: 'element', type: ColumnType.Node, props: schema.node })
+      // The element vector's special meta data maps property names to their
+      // nested vector indices (mirrors the Go client's per-element prepare).
+      decodePropVectorIndex(schema.node, elementVector.special_meta_data, true)
+      elements[i] = decodeNode(ctx, elementVector, sentinelOffset, { kind: 'element', type: ColumnType.Node, props: schema.node })
     } else {
-      elements[i] = decodeEdge(ctx, vector.nested_vectors[pair.cur], sentinelOffset, { kind: 'element', type: ColumnType.Edge, props: schema.edge })
+      decodePropVectorIndex(schema.edge, elementVector.special_meta_data, false)
+      elements[i] = decodeEdge(ctx, elementVector, sentinelOffset, { kind: 'element', type: ColumnType.Edge, props: schema.edge })
     }
     // The adjacency vector holds the next hop header as a flat int64.
     const adjVector = vector.nested_vectors[pair.adj]

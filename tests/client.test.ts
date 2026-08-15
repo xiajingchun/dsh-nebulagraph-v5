@@ -10,7 +10,7 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import * as grpc from '@grpc/grpc-js'
 import * as protoLoader from '@grpc/proto-loader'
-import { NebulaClient, STATUS_SUCCESS } from '../src/client.ts'
+import { NebulaClient, STATUS_SUCCESS } from '../src/nebula-client.ts'
 
 const protoDir = join(dirname(fileURLToPath(import.meta.url)), '..', 'src', 'proto')
 

@@ -8,8 +8,8 @@
 
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { JsonValue } from '@deepseek-ai/dsh-tools'
-import { NebulaClient } from './client.ts'
-import type { NebulaExecuteResult } from './client.ts'
+import { NebulaClient } from './nebula-client.ts'
+import type { NebulaExecuteResult } from './nebula-client.ts'
 import { formatValue, renderTable } from './format.ts'
 import { extractGraphData } from './graphData.ts'
 import type { GraphProjection } from './graphData.ts'
