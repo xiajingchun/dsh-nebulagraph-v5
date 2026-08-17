@@ -5,6 +5,10 @@
  * The host half of `nebula_execute` projects a replayable `{ graph }` payload
  * into `tool/result` meta; this plugin's conversation node matches those
  * events and a keyed Chat renderer mounts a G6 graph (drag / zoom) from it.
+ *
+ * Only the turn's FINAL graph renders: one card per turn whose content is the
+ * latest graph-carrying tool result, so intermediate results the agent
+ * produces while thinking never accumulate as separate G6 cards.
  */
 
 import { createElement, useEffect, useRef, useState } from 'react'
@@ -66,9 +70,10 @@ interface SchemaGraphProjection {
 type NebulaGraphPayload = GraphProjection | SchemaGraphProjection
 
 interface NebulaGraphState {
-  graph: NebulaGraphPayload
+  /** The latest graph-carrying tool result of the turn; absent before any. */
+  graph?: NebulaGraphPayload
   turn: number
-  step: number
+  step?: number
 }
 
 interface NebulaGraphChatData {
@@ -97,39 +102,57 @@ function locationOf(context: ConversationNodeContext): ConversationLocation {
 }
 
 /**
- * One tool/result is a complete business unit: stable id from the event's own
- * log position, start-only (no updates), published immediately.
+ * One G6 card per turn — "only the final result renders". The per-turn
+ * context opens on `turn/start`, and every graph-carrying `tool/result` of
+ * that turn replaces the state with its LATEST graph; intermediate graph
+ * tool results therefore never accumulate as separate cards. The card stays
+ * anchored to the newest graph result's log position, so once the turn
+ * settles the single card left behind is the turn's final graph, sitting
+ * exactly where that final result appears in the conversation.
  */
 const nebulaGraphDefinition: ConversationNodeDefinition<NebulaGraphState> = {
   kind: 'nebula-graph',
   target: 'chat',
   match: (event) => {
+    // Open the per-turn context on turn/start (guaranteed to precede the
+    // turn's tool results), so the first graph result of the turn can update
+    // an existing context instead of starting a second one.
+    if (event.type === 'turn/start') {
+      return { id: `nebula-${event.data.turn}`, role: 'start' }
+    }
     if (event.type === 'tool/result' && isGraphMeta(event.data.meta)) {
-      return { id: `nebula-${event.seq}`, role: 'start' }
+      return { id: `nebula-${event.data.turn}`, role: 'update' }
     }
     return null
   },
   start: (context, match) => {
-    if (match.event.type !== 'tool/result') throw new Error('nebula-graph requires tool/result')
+    if (match.event.type !== 'turn/start') throw new Error('nebula-graph start requires turn/start')
+    return { turn: match.event.data.turn }
+  },
+  update: (context, match) => {
+    if (match.event.type !== 'tool/result') return context.state
     const meta = match.event.data.meta
-    if (!isGraphMeta(meta)) throw new Error('nebula-graph requires graph meta')
+    if (!isGraphMeta(meta)) return context.state
     return {
       graph: meta.graph,
       turn: match.event.data.turn,
       step: match.event.data.step,
     }
   },
-  update: (context) => context.state,
   publication: () => 'immediate',
   buildViewNode: (context) => {
-    if (context.state === undefined) return null
+    if (context.state === undefined || context.state.graph === undefined) return null
+    // Anchor to the latest graph tool/result of the turn: matches are in
+    // ascending log order and every update match is a graph tool/result, so
+    // the last match is the turn's final graph result.
+    const latest = context.matches.at(-1)
     return {
       key: context.key,
       kind: 'nebula-graph',
       id: context.id,
       target: 'chat',
-      anchorSeq: context.start?.event.seq ?? context.matches[0]?.event.seq ?? 0,
-      location: locationOf(context),
+      anchorSeq: latest?.event.seq ?? context.start?.event.seq ?? 0,
+      location: latest?.location ?? locationOf(context),
       visibility: 'visible',
       data: { graph: context.state.graph },
     }

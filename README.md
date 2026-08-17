@@ -37,7 +37,13 @@ an ngql-style ASCII table render.
   contains nodes, edges, or paths, the result is projected into a replayable
   graph payload and the bundled Web Client plugin renders it as an interactive
   [AntV G6](https://g6.antv.antgroup.com/) graph (drag / zoom / hover),
-  alongside the normal table output. Node labels always show the vertex's
+  alongside the normal table output. Only the **final** graph result of each
+  turn renders: the plugin keeps one G6 card per turn whose content is the
+  latest graph-carrying tool result, so intermediate results the agent
+  produces while thinking (probe queries, exploration steps) never accumulate
+  as separate cards — the single card left behind after the turn settles is
+  the turn's last graph, placed at that result's position in the
+  conversation. Node labels always show the vertex's
   **primary key** — the property values named by `DESC GRAPH TYPE` for the
   node's type (the v5 columnar result carries no primary-key definition, so
   the host resolves it lazily via `SHOW GRAPHS` + `DESC GRAPH TYPE` and
