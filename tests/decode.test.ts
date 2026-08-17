@@ -251,6 +251,67 @@ describe('decodeResultTable', () => {
     assert.equal(formatValue(decoded.rows[0][0]), `(${Number(nodeId)}@Person:Person&Actor{name:Tom})`)
   })
 
+  it('resolves edge type names from the edge schema, not the node schema', () => {
+    // Regression: element type ids live in one namespace per graph — a node
+    // and an edge type can share the same id, so edge names must be looked
+    // up in the edge map (the follow edge and the team node share id 3 here).
+    const edgeTypeId = 3
+    const edgeHeader = Buffer.concat([i64(1n), i64(2n), i64(7n), i32(1), i32(edgeTypeId)])
+    const specialMeta = Buffer.concat([
+      u32(1), u16(6), Buffer.from('degree'),
+      u32(1), i32(1), u16(edgeTypeId), u32(1), i32(0),
+    ])
+    const vector: ProtoNestedVector = {
+      num_nested_vectors: 1,
+      common_meta_data: { num_records: 1, vector_content_type: 2 },
+      special_meta_data: specialMeta,
+      vector_data: edgeHeader,
+      null_bit_map: null,
+      nested_vectors: [flatVector([i32(85)])],
+    }
+    const columnType = Buffer.concat([
+      Buffer.from([0x02]), // Edge
+      u32(1), i32(1), i32(edgeTypeId), u32(1), u16(6), Buffer.from('degree'), Buffer.from([0x09]),
+    ])
+    const graphSchema: ProtoVectorResultTable['meta']['graph_schema'] = [
+      {
+        graph_id: 1,
+        graph_name: Buffer.from('basketballplayer'),
+        node_type: [
+          { node_type_id: edgeTypeId, node_type_name: Buffer.from('team'), label: [Buffer.from('team')] },
+        ],
+        edge_type: [
+          { edge_type_id: edgeTypeId, edge_type_name: Buffer.from('follow'), label: [Buffer.from('follow')] },
+        ],
+      },
+    ]
+    const decoded = decodeResultTable({
+      data_layout_version: Buffer.from([1]),
+      meta: {
+        table_type: 0,
+        num_records: '1',
+        row_type: { num_columns: 1, column_names: ['e'], column_types: [{ value_type: columnType }] },
+        num_batches: 1,
+        time_zone_offset: 0,
+        is_little_endian: true,
+        graph_schema: graphSchema,
+      },
+      batch: [{ vectors: [vector] }],
+    })
+    assert.deepEqual(decoded.rows, [
+      [{
+        srcId: 1,
+        dstId: 2,
+        rank: 7,
+        direction: 'outgoing',
+        graph: 'basketballplayer',
+        type: 'follow',
+        labels: ['follow'],
+        properties: { degree: 85 },
+      }],
+    ])
+  })
+
   it('renders an ngql-style table', () => {
     const t = table(
       ['name', 'age'],

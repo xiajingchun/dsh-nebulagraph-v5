@@ -8,6 +8,18 @@ import { randomUUID } from 'node:crypto'
 import { NebulaClient } from './nebula-client.ts'
 import type { NebulaConnectOptions } from './nebula-client.ts'
 
+/** Lazy catalog cache for resolving element keys of graph results. */
+export interface SchemaCache {
+  /** graph name → graph type, from `SHOW GRAPHS`. */
+  graphTypes: Map<string, string>
+  /** `graphType\0nodeType` → primary-key property names, from `DESC GRAPH TYPE`. */
+  nodePrimaryKeys: Map<string, string[]>
+  /** `graphType\0edgeType` → multiedge-key property names, from `DESC GRAPH TYPE`. */
+  edgeMultiedgeKeys: Map<string, string[]>
+  /** graphType → in-flight `DESC GRAPH TYPE` fetch (dedupes concurrent lookups). */
+  inflight: Map<string, Promise<void>>
+}
+
 /** One registered connection. */
 export interface ConnectionEntry {
   /** Opaque handle the model passes back to `nebula_execute`. */
@@ -24,6 +36,12 @@ export interface ConnectionEntry {
    * model's follow-up queries) target the graph the session is already on.
    */
   currentGraph?: string
+  /**
+   * Catalog cache populated on the first graph-shaped `nebula_execute`
+   * result: the v5 columnar result carries no primary-key definition, so
+   * `SHOW GRAPHS` + `DESC GRAPH TYPE` are fetched lazily and cached here.
+   */
+  schemaCache?: SchemaCache
 }
 
 /** Tracks live connections; disposing the plugin closes every session. */

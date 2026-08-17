@@ -26,6 +26,22 @@ describe('extractGraphData', () => {
     assert.equal(graph.nodes.length, 2)
     assert.equal(graph.edges.length, 0)
     assert.deepEqual(graph.nodes.map((n) => n.id), ['1', '2'])
+    // No primary-key resolver: the field is present and empty.
+    assert.deepEqual(graph.nodes[0].primaryKey, [])
+  })
+
+  it('resolves primary-key property names via the resolver (per graph and type)', () => {
+    const graph = extractGraphData(
+      [
+        [{ nodeId: 1, graph: 'movie', type: 'Movie', labels: ['Movie'], properties: { id: 129, name: 'A' } }],
+        [{ nodeId: 2, graph: 'movie', type: 'Actor', labels: ['Person'], properties: { id: 3 } }],
+      ],
+      (g, t) => (g === 'movie' && t === 'Movie' ? ['id', 'name'] : t === 'Actor' ? ['id'] : undefined),
+    )
+    assert.ok(graph)
+    // Composite key: both property names are kept for the client to compose.
+    assert.deepEqual(graph.nodes[0].primaryKey, ['id', 'name'])
+    assert.deepEqual(graph.nodes[1].primaryKey, ['id'])
   })
 
   it('projects edge cells and synthesizes missing endpoint nodes', () => {
@@ -46,7 +62,50 @@ describe('extractGraphData', () => {
       rank: '0',
       direction: 'outgoing',
       properties: { since: 2000 },
+      multiedgeKey: [],
     })
+  })
+
+  it('upgrades endpoint placeholders when the real node cell arrives later', () => {
+    // `RETURN v, e, w` delivers the edge before its endpoint node cell, so
+    // the placeholder created for w must be replaced by the real cell.
+    const graph = extractGraphData([
+      [{
+        nodeId: 1,
+        graph: 'basketballplayer',
+        type: 'player',
+        labels: ['player'],
+        properties: { id: 'p1', name: 'Steve' },
+      }, {
+        srcId: 1, dstId: 2, rank: 0, direction: 'outgoing', graph: 'basketballplayer', type: 'serve',
+        labels: [], properties: {},
+      }, {
+        nodeId: 2,
+        graph: 'basketballplayer',
+        type: 'team',
+        labels: ['team'],
+        properties: { id: 't1', name: 'Warriors' },
+      }],
+    ], () => ['id'])
+    assert.ok(graph)
+    const team = graph.nodes.find((n) => n.id === '2')
+    assert.ok(team)
+    assert.equal(team.type, 'team')
+    assert.deepEqual(team.properties, { id: 't1', name: 'Warriors' })
+    assert.deepEqual(team.primaryKey, ['id'])
+  })
+
+  it('resolves multiedge-key property names via the resolver', () => {
+    const graph = extractGraphData(
+      [[{
+        srcId: 1, dstId: 2, rank: 0, direction: 'outgoing', graph: 'basketballplayer', type: 'serve',
+        labels: [], properties: { start_year: 2000, end_year: 2015 },
+      }]],
+      undefined,
+      (g, t) => (g === 'basketballplayer' && t === 'serve' ? ['start_year', 'end_year'] : undefined),
+    )
+    assert.ok(graph)
+    assert.deepEqual(graph.edges[0].multiedgeKey, ['start_year', 'end_year'])
   })
 
   it('expands path cells into nodes and edges', () => {

@@ -37,7 +37,20 @@ an ngql-style ASCII table render.
   contains nodes, edges, or paths, the result is projected into a replayable
   graph payload and the bundled Web Client plugin renders it as an interactive
   [AntV G6](https://g6.antv.antgroup.com/) graph (drag / zoom / hover),
-  alongside the normal table output. To feed this renderer, the bundled
+  alongside the normal table output. Node labels always show the vertex's
+  **primary key** — the property values named by `DESC GRAPH TYPE` for the
+  node's type (the v5 columnar result carries no primary-key definition, so
+  the host resolves it lazily via `SHOW GRAPHS` + `DESC GRAPH TYPE` and
+  caches it per connection); a **composite primary key** joins its values
+  with `:`. Edge labels show the edge type name, plus the composed
+  **multiedge-key** values with their property names (e.g.
+  `serve (start_year=2002, end_year=2011)`) only when the type's
+  multiedge key defines real properties — `Unique`/`Auto` edges get no
+  suffix, and the raw rank is never shown. Hovering a node or edge opens a
+  tooltip with its full type/labels and property list (properties beyond the
+  first 10 and values longer than 80 chars are truncated to keep the card
+  compact).
+  To feed this renderer, the bundled
   `gql-query-generator` skill defaults `RETURN` to the **complete graph
   elements** whenever a prompt asks to return a node type or edge type (e.g.
   "return Star Wars directors and actors") — the pattern's node and edge
@@ -46,6 +59,10 @@ an ngql-style ASCII table render.
   **schema meta-graph**: node types become card vertices (name, labels,
   🔑 primary key, properties) and edge types become arcs between their
   pattern's source/target node types, laid out with a layered dagre layout.
+  Large data graphs switch to a **lite mode** (>300 nodes or >600 edges):
+  bounded force layout, no edge labels, and lighter drag behaviors; payloads
+  above 700 nodes / 1400 edges are additionally capped client-side (with a
+  notice) so the browser stays responsive.
   `(src)-[rank@type:labels{props}]->(dst)`, `2019-01-01T12:34:56.123456`,
   durations as `P1Y2M3DT4H5M6.123456S`, …) and an ASCII table output.
 - `SESSION SET graph` and other session-state statements persist per

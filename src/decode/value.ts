@@ -423,7 +423,7 @@ function decodeNode(ctx: DecodeContext, vector: NestedVectorLike, index: number,
   const nodeId = int64ToJson(bytesToInt64Big(header.subarray(0, 8)))
   const graphId = bytesToInt32(header.subarray(8, 12))
   const nodeTypeId = Number(bytesToInt64Big(header.subarray(0, 8)) >> 48n)
-  return decodeElementWithProps(ctx, vector, index, schema.props, graphId, nodeTypeId, (names, props) => ({
+  return decodeElementWithProps(ctx, vector, index, schema.props, graphId, nodeTypeId, true, (names, props) => ({
     nodeId,
     graph: names.graph,
     type: names.type,
@@ -442,7 +442,7 @@ function decodeEdge(ctx: DecodeContext, vector: NestedVectorLike, index: number,
   const edgeTypeId = bytesToInt32(header.subarray(28, 32))
   const noDirectType = edgeTypeId & 0x3fffffff
   const direction = getEdgeDirection(edgeTypeId >> 30)
-  return decodeElementWithProps(ctx, vector, index, schema.props, graphId, noDirectType, (names, props) => {
+  return decodeElementWithProps(ctx, vector, index, schema.props, graphId, noDirectType, false, (names, props) => {
     const outgoing = direction === EdgeDirection.Incoming
     return {
       srcId: outgoing ? dstId : srcId,
@@ -457,7 +457,12 @@ function decodeEdge(ctx: DecodeContext, vector: NestedVectorLike, index: number,
   })
 }
 
-/** Shared node/edge decoding: resolve the element schema names + property vectors. */
+/**
+ * Shared node/edge decoding: resolve the element schema names + property
+ * vectors. Element type ids live in one namespace per graph, so the schema
+ * name must be looked up in the node map for nodes and the edge map for
+ * edges — a node and an edge type can share the same id.
+ */
 function decodeElementWithProps<T>(
   ctx: DecodeContext,
   vector: NestedVectorLike,
@@ -465,11 +470,12 @@ function decodeElementWithProps<T>(
   elementPropsByGraph: GraphElementProps,
   graphId: number,
   elementTypeId: number,
+  isNode: boolean,
   build: (names: { graph: string; type: string; labels: string[] }, properties: Record<string, unknown>) => T,
 ): T {
   const props = elementPropsByGraph.get(graphId)?.get(elementTypeId)
   if (props === undefined) throw new Error(`element type not found: graph ${graphId}, type ${elementTypeId}`)
-  const names = getSchemaName(ctx.graphsSchema, graphId, elementTypeId, true)
+  const names = getSchemaName(ctx.graphsSchema, graphId, elementTypeId, isNode)
   const properties: Record<string, unknown> = {}
   for (const prop of props.values()) {
     const nested = vector.nested_vectors[prop.vectorIndex]

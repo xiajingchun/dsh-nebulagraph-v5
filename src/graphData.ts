@@ -12,6 +12,12 @@ export interface GraphNodeProjection {
   type: string
   labels: string[]
   properties: Record<string, unknown>
+  /**
+   * Primary-key property names for this node's type, from `DESC GRAPH TYPE`
+   * (empty when the catalog was unavailable). The primary key may combine
+   * several properties; the client composes the label from these names.
+   */
+  primaryKey: string[]
 }
 
 /** Edge projection for the client graph (endpoint ids as strings). */
@@ -23,6 +29,13 @@ export interface GraphEdgeProjection {
   rank?: string
   direction?: 'outgoing' | 'incoming' | 'none'
   properties: Record<string, unknown>
+  /**
+   * Multiedge-key property names for this edge's type, from `DESC GRAPH TYPE`
+   * (`['Unique']` / `['Auto']` when the type has no multiedge key). The key
+   * may combine several properties; the client only shows a key suffix when
+   * these are real property names.
+   */
+  multiedgeKey: string[]
 }
 
 /** The projected graph payload carried in `tool/result` meta. */
@@ -37,7 +50,7 @@ export interface GraphProjection {
 export const MAX_GRAPH_NODES = 1000
 export const MAX_GRAPH_EDGES = 2000
 
-interface NodeLike { nodeId: unknown; type: unknown; labels: unknown; properties: unknown }
+interface NodeLike { nodeId: unknown; type: unknown; labels: unknown; properties: unknown; graph?: unknown }
 interface EdgeLike {
   srcId: unknown
   dstId: unknown
@@ -46,6 +59,7 @@ interface EdgeLike {
   type: unknown
   labels: unknown
   properties: unknown
+  graph?: unknown
 }
 interface PathLike { elements: unknown }
 
@@ -81,28 +95,51 @@ function labelsOf(labels: unknown): string[] {
 /**
  * Extract nodes/edges from one decoded result value.
  *
+ * Cells are scanned in row order; an edge often appears before its endpoint
+ * node cell in the same row (e.g. `RETURN v, e, w`), so a placeholder is
+ * created for a missing endpoint and later upgraded in place when the real
+ * node cell arrives.
+ *
  * @param rows - decoded result rows (cells are plain JSON values).
+ * @param primaryKeyOf - optional resolver returning the primary-key property
+ *   names for a node's (graph, type); called with the node cell's own graph
+ *   name and element type name. Absent/unknown → `primaryKey: []`.
+ * @param multiedgeKeyOf - optional resolver returning the multiedge-key
+ *   property names for an edge's (graph, type). Absent/unknown → `[]`.
  * @returns a graph projection, or undefined when no node/edge/path cell was found.
  */
-export function extractGraphData(rows: unknown[][] | undefined | null): GraphProjection | undefined {
+export function extractGraphData(
+  rows: unknown[][] | undefined | null,
+  primaryKeyOf?: (graph: string, type: string) => string[] | undefined,
+  multiedgeKeyOf?: (graph: string, type: string) => string[] | undefined,
+): GraphProjection | undefined {
   if (!Array.isArray(rows) || rows.length === 0) return undefined
   const nodes = new Map<string, GraphNodeProjection>()
   const edges: GraphEdgeProjection[] = []
+  /** Endpoint placeholder ids (empty shells awaiting their real node cell). */
+  const placeholders = new Set<string>()
   let truncated = false
 
   const addNode = (cell: NodeLike): void => {
     const id = stringId(cell.nodeId)
-    if (nodes.has(id)) return
+    const existing = nodes.get(id)
+    // Real node already projected (or it is not a placeholder) — keep it.
+    if (existing !== undefined && !placeholders.has(id)) return
     if (nodes.size >= MAX_GRAPH_NODES) {
       truncated = true
       return
     }
+    const type = typeof cell.type === 'string' ? cell.type : ''
+    const graph = typeof cell.graph === 'string' ? cell.graph : ''
     nodes.set(id, {
       id,
-      type: typeof cell.type === 'string' ? cell.type : '',
+      type,
       labels: labelsOf(cell.labels),
       properties: plainProperties(cell.properties),
+      primaryKey: primaryKeyOf !== undefined && graph !== '' ? primaryKeyOf(graph, type) ?? [] : [],
     })
+    // Upgrade in place: the real cell replaces the earlier placeholder.
+    placeholders.delete(id)
   }
 
   const addEdge = (cell: EdgeLike): void => {
@@ -112,25 +149,30 @@ export function extractGraphData(rows: unknown[][] | undefined | null): GraphPro
     }
     const source = stringId(cell.srcId)
     const target = stringId(cell.dstId)
-    // Ensure both endpoints exist so G6 does not drop the edge.
-    if (!nodes.has(source)) {
-      if (nodes.size < MAX_GRAPH_NODES) nodes.set(source, { id: source, type: '', labels: [], properties: {} })
-      else truncated = true
+    const ensureEndpoint = (id: string): void => {
+      if (nodes.has(id)) return
+      if (nodes.size >= MAX_GRAPH_NODES) {
+        truncated = true
+        return
+      }
+      nodes.set(id, { id, type: '', labels: [], properties: {}, primaryKey: [] })
+      placeholders.add(id)
     }
-    if (!nodes.has(target)) {
-      if (nodes.size < MAX_GRAPH_NODES) nodes.set(target, { id: target, type: '', labels: [], properties: {} })
-      else truncated = true
-    }
+    ensureEndpoint(source)
+    ensureEndpoint(target)
+    const type = typeof cell.type === 'string' ? cell.type : ''
+    const graph = typeof cell.graph === 'string' ? cell.graph : ''
     edges.push({
       id: `${source}->${target}#${edges.length}`,
       source,
       target,
-      type: typeof cell.type === 'string' ? cell.type : '',
+      type,
       ...cell.rank !== undefined ? { rank: stringId(cell.rank) } : {},
       ...(cell.direction === 'outgoing' || cell.direction === 'incoming' || cell.direction === 'none')
         ? { direction: cell.direction }
         : {},
       properties: plainProperties(cell.properties),
+      multiedgeKey: multiedgeKeyOf !== undefined && graph !== '' ? multiedgeKeyOf(graph, type) ?? [] : [],
     })
   }
 

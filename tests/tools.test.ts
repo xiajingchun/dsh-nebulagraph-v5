@@ -21,6 +21,21 @@ function u32(n: number): Buffer {
   b.writeUInt32LE(n >>> 0, 0)
   return b
 }
+function u16(n: number): Buffer {
+  const b = Buffer.alloc(2)
+  b.writeUInt16LE(n, 0)
+  return b
+}
+function i64(n: bigint): Buffer {
+  const b = Buffer.alloc(8)
+  b.writeBigInt64LE(n, 0)
+  return b
+}
+function i32(n: number): Buffer {
+  const b = Buffer.alloc(4)
+  b.writeInt32LE(n, 0)
+  return b
+}
 function inlineString(s: string): Buffer {
   const bytes = Buffer.from(s, 'utf8')
   const header = Buffer.alloc(16)
@@ -118,6 +133,57 @@ function descGraphTypeTable(): unknown {
   )
 }
 
+/**
+ * One `MATCH (n) RETURN n` row: a single Actor vertex (type name `Actor`,
+ * label `Person`, one string property `name`), encoded in the v5 columnar
+ * node layout — the same shape the live server returns.
+ */
+function nodeTable(): unknown {
+  const nodeTypeId = 3
+  const vertexId = 100n
+  const nodeId = (BigInt(nodeTypeId) << 48n) | vertexId
+  const nodeHeader = Buffer.concat([i64(nodeId), i32(1), Buffer.alloc(4)])
+  // prop vector index special meta: 1 prop "name"; 1 element type; graph 1, type 3, 1 prop, vector index 0
+  const specialMeta = Buffer.concat([
+    u32(1), u16(4), Buffer.from('name'),
+    u32(1), i32(1), u16(nodeTypeId), u32(1), i32(0),
+  ])
+  const vector = {
+    num_nested_vectors: 1,
+    common_meta_data: { num_records: 1, vector_content_type: 2 },
+    special_meta_data: specialMeta,
+    vector_data: nodeHeader,
+    null_bit_map: null,
+    nested_vectors: [strVector(['Tom'])],
+  }
+  const columnType = Buffer.concat([
+    Buffer.from([0x01]), // Node
+    u32(1), i32(1), u16(nodeTypeId), u32(1), u16(4), Buffer.from('name'), Buffer.from([0x10]),
+  ])
+  return {
+    data_layout_version: Buffer.from([1]),
+    meta: {
+      table_type: 0,
+      num_records: '1',
+      row_type: { num_columns: 1, column_names: ['n'], column_types: [{ value_type: columnType }] },
+      num_batches: 1,
+      time_zone_offset: 0,
+      is_little_endian: true,
+      graph_schema: [
+        {
+          graph_id: 1,
+          graph_name: Buffer.from('movie'),
+          node_type: [
+            { node_type_id: nodeTypeId, node_type_name: Buffer.from('Actor'), label: [Buffer.from('Person')] },
+          ],
+          edge_type: [],
+        },
+      ],
+    },
+    batch: [{ vectors: [vector] }],
+  }
+}
+
 function startFakeServer(): Promise<{ port: number; close: () => Promise<void>; seenStmts: string[] }> {
   const packageDefinition = protoLoader.loadSync(['nebula/graph.proto', 'nebula/common.proto', 'nebula/vector.proto'], {
     includeDirs: [protoDir],
@@ -144,6 +210,8 @@ function startFakeServer(): Promise<{ port: number; close: () => Promise<void>; 
         callback(null, { status: okStatus, result: showGraphsTable(), summary: { elapsed_time: { total_server_time_us: '99' } } })
       } else if (stmt.startsWith('DESC GRAPH TYPE')) {
         callback(null, { status: okStatus, result: descGraphTypeTable() })
+      } else if (stmt.startsWith('MATCH')) {
+        callback(null, { status: okStatus, result: nodeTable(), summary: { elapsed_time: { total_server_time_us: '99' } } })
       } else if (/^\s*SESSION SET graph\s+/i.test(stmt)) {
         callback(null, { status: okStatus })
       } else {
@@ -252,6 +320,45 @@ describe('dsh-nebula plugin', () => {
 
       // Plugin dispose closes any remaining sessions (registry cleanup).
       await Promise.all(disposers.map((disposer) => disposer()))
+    } finally {
+      await fakeServer.close()
+    }
+  })
+
+  it('resolves node primary keys from DESC GRAPH TYPE for graph results', async () => {
+    const fakeServer = await startFakeServer()
+    try {
+      const { ctx, registered } = stubContext()
+      apply(ctx as never, Config({}))
+
+      const connectTool = registered.get('nebula_connect')!
+      const executeTool = registered.get('nebula_execute')!
+      const connected = (await runExec(connectTool, {
+        host: '127.0.0.1',
+        port: fakeServer.port,
+        user: 'root',
+        password: 'secret',
+      })) as { connectionId: string }
+
+      const result = (await runExec(executeTool, {
+        connectionId: connected.connectionId,
+        gql: 'MATCH (n) RETURN n LIMIT 1',
+      })) as { ok: boolean; rows: unknown[][] }
+      assert.equal(result.ok, true)
+      // The graph result warmed the per-connection catalog cache:
+      // SHOW GRAPHS (graph name → graph type) + DESC GRAPH TYPE (type → PK).
+      assert.ok(fakeServer.seenStmts.some((s) => s.startsWith('SHOW GRAPHS')))
+      assert.ok(fakeServer.seenStmts.some((s) => s.startsWith('DESC GRAPH TYPE `movie_type`')))
+
+      // The projected meta carries the node with its primary-key property
+      // names resolved from the catalog (Actor → [id]).
+      const meta = executeTool.output.presentationMeta!(
+        { connectionId: connected.connectionId },
+        result as never,
+      ) as unknown as { graph: { nodes: { id: string; type: string; primaryKey: string[] }[]; edges: unknown[] } }
+      assert.equal(meta.graph.nodes.length, 1)
+      assert.equal(meta.graph.nodes[0].type, 'Actor')
+      assert.deepEqual(meta.graph.nodes[0].primaryKey, ['id'])
     } finally {
       await fakeServer.close()
     }

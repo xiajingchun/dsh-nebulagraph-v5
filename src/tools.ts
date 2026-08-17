@@ -13,8 +13,8 @@ import type { NebulaExecuteResult } from './nebula-client.ts'
 import { formatValue, renderTable } from './format.ts'
 import { extractGraphData } from './graphData.ts'
 import type { GraphProjection } from './graphData.ts'
-import type { ConnectionRegistry } from './registry.ts'
-import { buildSchemaGraphMeta, collectGraphSchema, formatSchemaOverview, sessionSetGraph } from './schema.ts'
+import type { ConnectionEntry, ConnectionRegistry } from './registry.ts'
+import { buildSchemaGraphMeta, collectGraphSchema, formatSchemaOverview, parseGraphTypeDesc, parseShowGraphs, sessionSetGraph } from './schema.ts'
 
 /** Defaults used when a tool argument is omitted. */
 export interface NebulaToolDefaults {
@@ -97,6 +97,104 @@ function formatExecuteOutput(result: NebulaExecuteResult): string {
   }
   if (footerBits.length > 0) parts.push(footerBits.join(' '))
   return parts.join('\n')
+}
+
+/**
+ * Primary-key lookup from the per-entry catalog cache. The v5 columnar
+ * result carries no primary-key definition, so this only knows what
+ * `SHOW GRAPHS` + `DESC GRAPH TYPE` already populated.
+ */
+function lookupPrimaryKey(entry: ConnectionEntry, graph: string, type: string): string[] | undefined {
+  const cache = entry.schemaCache
+  if (cache === undefined) return undefined
+  const graphType = cache.graphTypes.get(graph)
+  if (graphType === undefined) return undefined
+  return cache.nodePrimaryKeys.get(`${graphType}\0${type}`)
+}
+
+/** Multiedge-key lookup (same catalog cache as primary keys). */
+function lookupMultiedgeKey(entry: ConnectionEntry, graph: string, type: string): string[] | undefined {
+  const cache = entry.schemaCache
+  if (cache === undefined) return undefined
+  const graphType = cache.graphTypes.get(graph)
+  if (graphType === undefined) return undefined
+  return cache.edgeMultiedgeKeys.get(`${graphType}\0${type}`)
+}
+
+/** Fetch `DESC GRAPH TYPE` for one graph type; best-effort, cached, deduped. */
+async function fetchElementKeys(entry: ConnectionEntry, graphType: string, signal?: AbortSignal): Promise<void> {
+  const cache = entry.schemaCache
+  if (cache === undefined) return
+  const pending = cache.inflight.get(graphType)
+  if (pending !== undefined) {
+    await pending
+    return
+  }
+  const run = (async () => {
+    try {
+      const desc = await entry.client.execute(`DESC GRAPH TYPE \`${graphType.replaceAll('`', '``')}\``, signal)
+      if (desc.ok) {
+        const { nodes, edges } = parseGraphTypeDesc(desc)
+        for (const node of nodes) {
+          cache.nodePrimaryKeys.set(`${graphType}\0${node.name}`, node.primaryKey)
+        }
+        for (const edge of edges) {
+          cache.edgeMultiedgeKeys.set(`${graphType}\0${edge.name}`, edge.multiedgeKey)
+        }
+      }
+    } catch {
+      // Catalog resolution is best-effort: an empty key degrades the client
+      // label to its fallback instead of failing the query.
+    }
+  })()
+  cache.inflight.set(graphType, run)
+  try {
+    await run
+  } finally {
+    cache.inflight.delete(graphType)
+  }
+}
+
+/**
+ * Resolve the primary/multiedge-key property names for every
+ * (graph, element type) pair, warming the per-entry cache with
+ * `SHOW GRAPHS` + `DESC GRAPH TYPE`.
+ */
+async function resolveElementKeys(
+  entry: ConnectionEntry,
+  nodePairs: Array<[string, string]>,
+  edgePairs: Array<[string, string]>,
+  signal?: AbortSignal,
+): Promise<void> {
+  const pairs = [...nodePairs, ...edgePairs]
+  if (pairs.length === 0) return
+  if (entry.schemaCache === undefined) {
+    entry.schemaCache = {
+      graphTypes: new Map(),
+      nodePrimaryKeys: new Map(),
+      edgeMultiedgeKeys: new Map(),
+      inflight: new Map(),
+    }
+  }
+  const cache = entry.schemaCache
+  const graphs = [...new Set(pairs.map(([graph]) => graph))]
+  const missingGraphs = graphs.filter((graph) => !cache.graphTypes.has(graph))
+  if (missingGraphs.length > 0) {
+    try {
+      const show = await entry.client.execute('SHOW GRAPHS', signal)
+      if (show.ok) {
+        for (const info of parseShowGraphs(show)) {
+          if (info.graphType !== '') cache.graphTypes.set(info.name, info.graphType)
+        }
+      }
+    } catch {
+      // best-effort (see fetchElementKeys)
+    }
+  }
+  const graphTypes = [...new Set(
+    pairs.map(([graph]) => cache.graphTypes.get(graph)).filter((t): t is string => t !== undefined),
+  )]
+  await Promise.all(graphTypes.map((graphType) => fetchElementKeys(entry, graphType, signal)))
 }
 
 /**
@@ -196,8 +294,18 @@ export function applyNebulaTools(
       render: (_args, value) => [{ type: 'text', text: formatExecuteOutput(value as never) }],
       // Replayable graph projection: the Web Client renders an interactive
       // AntV G6 graph from this meta when the result contains nodes/edges.
-      presentationMeta: (_args, value) => {
-        const graph = extractGraphData((value as { rows?: unknown[][] }).rows)
+      // Node primary keys and edge multiedge keys are resolved from the
+      // per-entry catalog cache (warmed by execute) — see resolveElementKeys.
+      presentationMeta: (args, value) => {
+        const entry = registry.get((args as ExecuteArgs).connectionId)
+        const rows = (value as { rows?: unknown[][] }).rows
+        const graph = entry === undefined
+          ? extractGraphData(rows)
+          : extractGraphData(
+              rows,
+              (graphName, type) => lookupPrimaryKey(entry, graphName, type),
+              (graphName, type) => lookupMultiedgeKey(entry, graphName, type),
+            )
         // Projection objects are plain JSON; the interface cast keeps the
         // host schema honest at the meta boundary.
         return (graph === undefined ? {} : { graph }) as unknown as JsonValue
@@ -215,6 +323,28 @@ export function applyNebulaTools(
       if (result.ok) {
         const graph = sessionSetGraph(args.gql)
         if (graph !== undefined) entry.currentGraph = graph
+      }
+      // Warm the element-key catalog cache for graph-shaped results so the
+      // presentation meta can label nodes with primary keys and edges with
+      // their multiedge keys.
+      if (result.ok) {
+        const rows = result.rows as unknown[][]
+        const missingNodes: Array<[string, string]> = []
+        const missingEdges: Array<[string, string]> = []
+        extractGraphData(
+          rows,
+          (graphName, type) => {
+            const pk = lookupPrimaryKey(entry, graphName, type)
+            if (pk === undefined) missingNodes.push([graphName, type])
+            return pk
+          },
+          (graphName, type) => {
+            const mk = lookupMultiedgeKey(entry, graphName, type)
+            if (mk === undefined) missingEdges.push([graphName, type])
+            return mk
+          },
+        )
+        await resolveElementKeys(entry, missingNodes, missingEdges, exec.signal)
       }
       // Decoded cells are JSON-safe by construction (see the decode package).
       return { ...result, rows: result.rows as JsonValue[][] }
