@@ -80,13 +80,25 @@ an ngql-style ASCII table render.
   and resolve against the packaged directory).
 - Plugin config supplies default connection parameters; every tool argument
   can override them per call.
+- **Password never travels through the model**: `nebula_connect` takes a
+  `passwordRef` (a credential reference / environment variable name), not the
+  password value. The value is resolved per connection through the DSH
+  credentials seam (`ctx.credentials`, falling back to the process
+  environment) and cleared from memory right after authentication. Tool
+  arguments, output, and the registry never carry the plaintext.
+- **TLS by default, plaintext fallback available**: connections try TLS first
+  (`tls: "auto"`, the default) and fall back to plaintext only when the server
+  has no TLS listener — the fallback is reported to the caller as a warning.
+  Set `tls: "on"` to require TLS (fails if the server does not speak it) or
+  `tls: "off"` to force plaintext. CA / client certificate / key / server name
+  overrides are configurable for private CAs and mutual TLS.
 - Unloading the plugin closes every open session (effect-based cleanup).
 
 ## Tools
 
 | Tool | Purpose |
 | --- | --- |
-| `nebula_connect` | Connect to a graphd and open a session. Arguments: `host`, `port`, `user`, `password`, `timeoutMs` (all optional, defaulting to plugin config). Returns a `connectionId`. |
+| `nebula_connect` | Connect to a graphd and open a session. Arguments: `host`, `port`, `user`, `passwordRef`, `tls`, `ca`, `timeoutMs` (all optional, defaulting to plugin config). The password itself is never an argument — it resolves from `passwordRef` via the DSH credentials seam / environment. Returns a `connectionId` (plus `tlsFallback` when the server had no TLS). |
 | `nebula_execute` | Run one GQL statement on a connection. Arguments: `connectionId` (required), `gql` (required), `timeoutMs`. Returns `{ ok, columns, rows, numRows, latencyUs, summary?, error? }`. |
 | `nebula_schema` | Introspect a graph's schema. Arguments: `connectionId` (required), `graph` (optional — defaults to the session working graph, then the sole graph). Runs `SHOW GRAPHS` + `DESC GRAPH TYPE`, returns `{ graphs, graph, nodes, edges, … }`. Read-only. |
 | `nebula_disconnect` | Close a connection and release its server-side session. |
@@ -104,8 +116,8 @@ for link-installed plugins.
 Typical agent flow:
 
 ```text
-nebula_connect (host: 192.168.8.6, port: 9669, user: root, password: …)
-  → { connectionId: "…" }
+nebula_connect (host: 192.168.8.6, port: 9669, user: root, passwordRef: NEBULA_PASSWORD)
+  → { connectionId: "…", tlsFallback: false }
 nebula_execute (connectionId, gql: "SHOW GRAPHS")
 nebula_schema  (connectionId, graph: "movie")
   → { graphs: […], graph: { name: "movie", graphType: "movie_type", … },
@@ -169,7 +181,8 @@ Plugin config lives in the profile's patch layer (e.g.
         host: 127.0.0.1
         port: 9669
         user: root
-        password: ''
+        passwordRef: NEBULA_PASSWORD   # preferred: credential reference (env var name)
+        tls: auto                      # auto | on | off
         timeoutMs: 30000
         maxConnections: 5
 ```
@@ -179,9 +192,25 @@ Plugin config lives in the profile's patch layer (e.g.
 | `host` | `127.0.0.1` | Default graphd host. |
 | `port` | `9669` | Default graphd gRPC port. |
 | `user` | `root` | Default login user name. |
-| `password` | `''` | Default login password. |
+| `passwordRef` | *(none)* | Credential reference (environment variable name) resolving to the default password via the DSH credentials seam. **Preferred over `password`** — the value never appears in config surfaces, tool arguments, or logs. |
+| `password` | `''` | Default login password (plaintext). Fallback used only when `passwordRef` is unset; keep it out of shared config files. |
+| `tls` | `'auto'` | TLS mode: `auto` (try TLS, fall back to plaintext when the server has no TLS listener), `on` (require TLS), `off` (plaintext only). |
+| `ca` | *(none)* | CA bundle (PEM) for verifying the server certificate (private / self-signed CAs). |
+| `cert` / `key` | *(none)* | Client certificate and private key (PEM) for mutual TLS. The key is config-only and never exposed as a tool argument. |
+| `servername` | *(none)* | Override the server name used for SNI and certificate verification. |
 | `timeoutMs` | `30000` | Default per-request deadline (ms). |
 | `maxConnections` | `5` | Upper bound on concurrently open connections. |
+
+To use a `passwordRef`, store the value in the DSH credentials document
+(`~/.dsh/.credentials.yaml`, mode 0600) or the process environment, e.g.:
+
+```yaml
+# ~/.dsh/.credentials.yaml
+NEBULA_PASSWORD: s3cr3t
+```
+
+The password is resolved per connection at `nebula_connect` time and cleared
+from memory immediately after authentication succeeds.
 
 ## Development
 
@@ -201,7 +230,14 @@ beyond `@grpc/grpc-js`, `@grpc/proto-loader`, and `schemastery`.
   official NebulaGraph 5.0 definitions (graph/common/vector) from
   nebula-go v5. `AuthRequest.auth_info` is `JSON.stringify({ password })` and
   `ClientInfo.lang` advertises `JAVASCRIPT`; `Status.code == "00000"` means
-  success.
+  success. The password is sent only inside the one-time `Authenticate` call
+  and cleared from the client/registry options immediately after success.
+- **Transport security** — the channel uses gRPC credentials per the `tls`
+  mode: `on` → `createSsl` (with optional CA / client cert / server-name
+  override), `off` → `createInsecure`, `auto` → try TLS first, then recreate
+  the channel with plaintext credentials only when the handshake fails at the
+  transport level (never on an authentication failure). A plaintext fallback
+  is surfaced as `tlsFallback` in the connect output and as a warning line.
 - **Logout** — the v5 gRPC service has no signout RPC; closing a session
   executes the `SESSION CLOSE` statement before releasing the channel
   (mirroring nebula-go v5 `connection.Close()`), so the server-side session

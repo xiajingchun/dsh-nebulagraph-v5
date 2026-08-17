@@ -9,12 +9,23 @@
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { JsonValue } from '@deepseek-ai/dsh-tools'
 import { NebulaClient } from './nebula-client.ts'
-import type { NebulaExecuteResult } from './nebula-client.ts'
+import type { NebulaExecuteResult, TlsMode, TlsOptions } from './nebula-client.ts'
 import { formatValue, renderTable } from './format.ts'
 import { extractGraphData } from './graphData.ts'
 import type { GraphProjection } from './graphData.ts'
 import type { ConnectionEntry, ConnectionRegistry } from './registry.ts'
 import { buildSchemaGraphMeta, collectGraphSchema, formatSchemaOverview, parseGraphTypeDesc, parseShowGraphs, sessionSetGraph } from './schema.ts'
+
+/** A credential reference is a POSIX shell identifier (same rule as the DSH credentials seam). */
+const REF_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/
+
+/** Validate a credential reference without depending on the host's credentials package. */
+function assertCredentialRef(ref: string): string {
+  if (!REF_PATTERN.test(ref)) {
+    throw new TypeError(`passwordRef "${ref}" must be a POSIX identifier (letters, digits, underscore)`)
+  }
+  return ref
+}
 
 /** Defaults used when a tool argument is omitted. */
 export interface NebulaToolDefaults {
@@ -22,6 +33,24 @@ export interface NebulaToolDefaults {
   port: number
   user: string
   password: string
+  /**
+   * Credential reference (environment variable name) resolving to the
+   * default login password. Resolved per connection through the DSH
+   * credentials seam (falling back to the process environment), so the
+   * password never appears in tool arguments or configuration surfaces.
+   * Takes precedence over the plaintext `password` default.
+   */
+  passwordRef?: string
+  /** TLS mode for new connections (default `auto`). */
+  tls: TlsMode
+  /** CA bundle (PEM) for verifying the server certificate. */
+  ca?: string
+  /** Client certificate (PEM) for mutual TLS. */
+  cert?: string
+  /** Client private key (PEM) for mutual TLS. */
+  key?: string
+  /** Server name override for SNI and certificate verification. */
+  servername?: string
   timeoutMs: number
   /** Upper bound on concurrently open connections (default 5). */
   maxConnections: number
@@ -32,7 +61,15 @@ export interface ConnectArgs {
   host?: string
   port?: number
   user?: string
-  password?: string
+  /**
+   * Credential reference (environment variable name) resolving to this
+   * connection's password. Overrides the configured `passwordRef` default.
+   */
+  passwordRef?: string
+  /** TLS mode: `off` (plaintext), `on` (TLS required), `auto` (try TLS, fall back). */
+  tls?: TlsMode
+  /** CA bundle (PEM) for verifying the server certificate. */
+  ca?: string
   timeoutMs?: number
 }
 
@@ -48,19 +85,79 @@ export interface DisconnectArgs {
   connectionId: string
 }
 
-function resolveConnectArgs(args: ConnectArgs, defaults: NebulaToolDefaults): Required<ConnectArgs> {
+function resolveConnectArgs(args: ConnectArgs, defaults: NebulaToolDefaults): Omit<Required<ConnectArgs>, 'passwordRef' | 'ca'> & { passwordRef?: string; ca?: string } {
   if (args.host !== undefined && args.host.trim().length === 0) throw new Error('host must be a non-empty string')
   const port = args.port ?? defaults.port
   if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error(`port must be an integer in [1, 65535], got ${port}`)
   const timeoutMs = args.timeoutMs ?? defaults.timeoutMs
   if (!Number.isInteger(timeoutMs) || timeoutMs < 1) throw new Error('timeoutMs must be a positive integer')
+  let tls = args.tls ?? defaults.tls
+  if (tls !== 'off' && tls !== 'on' && tls !== 'auto') throw new Error(`tls must be "off", "on", or "auto", got ${tls}`)
+  // A non-auto tls in plugin config is an ENFORCED transport policy: the
+  // model-facing tool argument must not weaken it (e.g. tls: "on" → "auto"
+  // would silently downgrade to plaintext and defeat the admin's intent).
+  // The tool may only choose tls when the config leaves it flexible ("auto").
+  if (args.tls !== undefined && defaults.tls !== 'auto' && args.tls !== defaults.tls) {
+    throw new Error(
+      `tls is enforced as "${defaults.tls}" by plugin config and cannot be overridden to "${args.tls}" by a tool argument;`
+      + ' change the plugin config if a different transport policy is intended',
+    )
+  }
   return {
     host: args.host ?? defaults.host,
     port,
     user: args.user ?? defaults.user,
-    password: args.password ?? defaults.password,
+    passwordRef: args.passwordRef ?? defaults.passwordRef,
+    tls,
+    ca: args.ca ?? defaults.ca,
     timeoutMs,
   }
+}
+
+/** TLS options for one connection, merging per-call overrides with defaults. */
+function resolveTlsOptions(input: ReturnType<typeof resolveConnectArgs>, defaults: NebulaToolDefaults): TlsOptions {
+  const tls: TlsOptions = { mode: input.tls }
+  if (input.ca !== undefined && input.ca.trim().length > 0) tls.ca = input.ca
+  if (defaults.cert !== undefined && defaults.cert.length > 0) tls.cert = defaults.cert
+  if (defaults.key !== undefined && defaults.key.length > 0) tls.key = defaults.key
+  if (defaults.servername !== undefined && defaults.servername.length > 0) tls.servername = defaults.servername
+  return tls
+}
+
+/**
+ * Resolve the password for one connection: an explicit or configured
+ * `passwordRef` wins (resolved through the DSH credentials seam, falling
+ * back to the process environment), then the configured plaintext password.
+ * The value is used only for the authenticate call and never surfaces in
+ * tool arguments, output, or the registry.
+ */
+async function resolvePassword(
+  ctx: { get<T>(key: string): T | undefined },
+  ref: string | undefined,
+  fallback: string,
+): Promise<string> {
+  if (ref !== undefined && ref.trim().length > 0) {
+    const resolved = await resolveCredentialValue(ctx, ref)
+    if (resolved !== undefined && resolved.length > 0) return resolved
+    throw new Error(`passwordRef "${ref}" did not resolve to a value; set it in the environment or the DSH credentials store`)
+  }
+  return fallback
+}
+
+/** Resolve one credential reference through the credentials seam, then the environment. */
+async function resolveCredentialValue(
+  ctx: { get<T>(key: string): T | undefined },
+  ref: string,
+): Promise<string | undefined> {
+  assertCredentialRef(ref)
+  type CredentialsLike = { resolve(ref: string): Promise<{ value: string } | undefined> }
+  const credentials = ctx.get<CredentialsLike>('credentials')
+  if (credentials !== undefined) {
+    const resolved = await credentials.resolve(ref)
+    if (resolved !== undefined && resolved.value.length > 0) return resolved.value
+  }
+  const ambient = process.env[ref]
+  return ambient !== undefined && ambient.length > 0 ? ambient : undefined
 }
 
 function formatConnectOutput(result: {
@@ -69,12 +166,17 @@ function formatConnectOutput(result: {
   port: number
   user: string
   serverVersion: string
+  tlsFallback?: boolean
 }): string {
-  return [
+  const lines = [
     `Connected to NebulaGraph at ${result.host}:${result.port} as ${result.user}.`,
     `Server version: ${result.serverVersion}`,
     `Connection id: ${result.connectionId} — pass it to nebula_execute to run queries.`,
-  ].join('\n')
+  ]
+  if (result.tlsFallback === true) {
+    lines.push('Warning: the server did not complete a TLS handshake; connected over plaintext (insecure). Set tls: "on" to require TLS.')
+  }
+  return lines.join('\n')
 }
 
 /** Render an execute result like the ngql console: table, row count, errors. */
@@ -200,24 +302,30 @@ async function resolveElementKeys(
 /**
  * Register the three NebulaGraph tools on `ctx.tools`.
  *
- * @param ctx - the plugin context (must expose `ctx.tools`).
+ * @param ctx - the plugin context (must expose `ctx.tools` and, when
+ *   available, the optional `ctx.credentials` seam).
  * @param registry - the shared connection registry.
  * @param defaults - resolved plugin-config defaults.
  * @returns the registration disposer (usually left to the effect registry).
  */
 export function applyNebulaTools(
-  ctx: { tools: { register(tool: ReturnType<typeof defineTool>): unknown } },
+  ctx: {
+    tools: { register(tool: ReturnType<typeof defineTool>): unknown }
+    get<T>(key: string): T | undefined
+  },
   registry: ConnectionRegistry,
   defaults: NebulaToolDefaults,
 ): void {
   ctx.tools.register(defineTool({
     name: 'nebula_connect',
-    description: 'Connect to a NebulaGraph server and start a session. Returns a connectionId to use with nebula_execute. Credentials default to plugin config; provide them per-call to connect elsewhere.',
+    description: 'Connect to a NebulaGraph server and start a session. Returns a connectionId to use with nebula_execute. Host/port/user default to plugin config. The password is resolved per connection from the configured passwordRef (via the DSH credentials seam or the environment) — never pass a password as a tool argument. TLS defaults to "auto": try TLS, then fall back to plaintext when the server has no TLS listener; set tls to "on" to require TLS, or "off" for plaintext only. If a connection with tls: "on" fails, the server does not speak TLS or its certificate is untrusted — do NOT retry with different host/user/port/tls arguments, that cannot fix it; report the error to the user instead. When plugin config enforces a non-auto tls policy (tls: "on" or "off"), the tls argument cannot override it — the enforced policy applies and a conflicting tls argument is rejected.',
     parameters: {
       host: { type: 'string', description: 'Graphd host (defaults to plugin config, 127.0.0.1).' },
       port: { type: 'number', description: 'Graphd gRPC port (defaults to 9669).' },
       user: { type: 'string', description: 'Login user name (defaults to plugin config, root).' },
-      password: { type: 'string', description: 'Login password (defaults to plugin config).' },
+      passwordRef: { type: 'string', description: 'Credential reference (environment variable name) resolving to this connection\'s password; overrides the configured default. The password value itself is never a tool argument.' },
+      tls: { type: 'string', description: 'TLS mode: "auto" (default, try TLS then fall back to plaintext), "on" (require TLS — failure means the server has no TLS or an untrusted certificate, do not retry), or "off" (plaintext). Ignored/rejected when plugin config enforces a non-auto tls policy.' },
+      ca: { type: 'string', description: 'CA bundle (PEM) for verifying the server certificate, when it is not trusted by the system roots.' },
       timeoutMs: { type: 'number', description: 'Connect/auth timeout in milliseconds (default 30000).' },
     },
     output: {
@@ -230,24 +338,32 @@ export function applyNebulaTools(
           port: { type: 'number' },
           user: { type: 'string' },
           serverVersion: { type: 'string' },
+          tlsFallback: { type: 'boolean' },
         },
       },
       render: (_args, value) => [{ type: 'text', text: formatConnectOutput(value as never) }],
     },
     timeoutMs: 60_000,
     async execute(args, exec) {
-      const input = resolveConnectArgs(args, defaults)
+      const input = resolveConnectArgs(args as ConnectArgs, defaults)
       if (registry.list().length >= defaults.maxConnections) {
         throw new Error(`connection limit reached (${defaults.maxConnections}); disconnect an idle connection first (nebula_disconnect)`)
       }
-      const client = await NebulaClient.connect(input, exec.signal)
-      const entry = registry.add(input, client)
+      const password = await resolvePassword(ctx, input.passwordRef, defaults.password)
+      const tls = resolveTlsOptions(input, defaults)
+      // The same options object is passed to the client AND stored in the
+      // registry: `authenticate` clears `password` on it after success, so
+      // the plaintext never lingers in either the client or the registry.
+      const options = { ...input, password, tls }
+      const client = await NebulaClient.connect(options, exec.signal)
+      const entry = registry.add(options, client)
       return {
         connectionId: entry.connectionId,
         host: input.host,
         port: input.port,
         user: input.user,
         serverVersion: client.serverVersion,
+        tlsFallback: client.usedTlsFallback || undefined,
       }
     },
   }))

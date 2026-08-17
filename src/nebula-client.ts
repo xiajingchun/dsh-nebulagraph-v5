@@ -28,6 +28,38 @@ export const PROTOCOL_VERSION = '5.0.0'
 /** SQLSTATE-style success code returned in `Status.code`. */
 export const STATUS_SUCCESS = '00000'
 
+/**
+ * TLS mode:
+ * - `off` — plaintext gRPC (no TLS).
+ * - `on` — TLS required; the connection fails when the server does not
+ *   complete a TLS handshake (or presents an untrusted certificate).
+ * - `auto` (default) — try TLS first, then fall back to plaintext when the
+ *   handshake fails on the transport, so servers without TLS remain
+ *   reachable. The fallback is recorded on the client (`usedTlsFallback`)
+ *   and surfaced to the caller as a warning; authentication failures never
+ *   trigger the fallback.
+ */
+export type TlsMode = 'off' | 'on' | 'auto'
+
+/** TLS connection settings. */
+export interface TlsOptions {
+  mode: TlsMode
+  /**
+   * CA bundle (PEM) used to verify the server certificate; defaults to the
+   * system roots. Provide this for self-signed/private CAs.
+   */
+  ca?: string
+  /** Client certificate (PEM) for mutual TLS. */
+  cert?: string
+  /**
+   * Client private key (PEM) for mutual TLS. Never exposed as a model tool
+   * argument — configured on the plugin only.
+   */
+  key?: string
+  /** Override the server name used for SNI and certificate verification. */
+  servername?: string
+}
+
 /** Connection parameters for {@link NebulaClient}. */
 export interface NebulaConnectOptions {
   /** Graphd host. */
@@ -36,8 +68,10 @@ export interface NebulaConnectOptions {
   port: number
   /** Login user name (default `root`). */
   user: string
-  /** Login password. */
+  /** Login password. Cleared after a successful authentication. */
   password: string
+  /** TLS settings (defaults to `auto`). */
+  tls?: TlsOptions
   /** Per-request deadline in milliseconds (default 30000). */
   timeoutMs: number
 }
@@ -240,7 +274,37 @@ function callWithTimeout<T>(
   })
 }
 
-/** One authenticated NebulaGraph session over a gRPC channel. */
+/**
+ * Build the channel credentials for one TLS mode.
+ *
+ * `auto` needs a first TLS attempt to probe whether the server speaks TLS at
+ * all; the probe uses the same credentials as `on` so a configured CA/client
+ * certificate applies to both.
+ */
+function buildChannelCredentials(tls: TlsOptions | undefined, useTls: boolean): grpc.ChannelCredentials {
+  if (!useTls) return grpc.credentials.createInsecure()
+  const ca = tls?.ca !== undefined && tls.ca.length > 0 ? Buffer.from(tls.ca) : undefined
+  const key = tls?.key !== undefined && tls.key.length > 0 ? Buffer.from(tls.key) : undefined
+  const cert = tls?.cert !== undefined && tls.cert.length > 0 ? Buffer.from(tls.cert) : undefined
+  return grpc.credentials.createSsl(ca ?? null, key ?? null, cert ?? null)
+}
+
+/** gRPC channel arguments shared by every connection. */
+function buildChannelArgs(tls: TlsOptions | undefined, useTls: boolean): Record<string, unknown> {
+  const args: Record<string, unknown> = {
+    'grpc.max_receive_message_length': -1,
+    'grpc.max_send_message_length': -1,
+    'grpc.keepalive_time_ms': 30_000,
+  }
+  if (useTls && tls?.servername !== undefined && tls.servername.length > 0) {
+    args['grpc.ssl_target_name_override'] = tls.servername
+  }
+  return args
+}
+
+/**
+ * One authenticated NebulaGraph session over a gRPC channel.
+ */
 export class NebulaClient {
   private channel: grpc.Client
   private client: GraphServiceClient
@@ -258,31 +322,74 @@ export class NebulaClient {
    * Connect to a graphd and authenticate. Throws {@link NebulaError} on
    * transport or authentication failure.
    *
+   * TLS follows the {@link TlsMode} in `options.tls` (default `auto`): TLS
+   * first, then a plaintext fallback only when the handshake fails at the
+   * transport level — never on an authentication failure. The fallback is
+   * recorded on `usedTlsFallback` so callers can warn the user.
+   *
    * @param options - connection parameters.
    * @param signal - optional abort signal to cancel the attempt.
    * @returns an authenticated client.
    */
   static async connect(options: NebulaConnectOptions, signal?: AbortSignal): Promise<NebulaClient> {
+    const tls = options.tls ?? { mode: 'auto' as const }
+    const useTls = tls.mode === 'on' || tls.mode === 'auto'
     const address = `${options.host}:${options.port}`
     const Ctor = getServiceCtor()
-    const channel = new grpc.Client(address, grpc.credentials.createInsecure(), {
-      'grpc.max_receive_message_length': -1,
-      'grpc.max_send_message_length': -1,
-      'grpc.keepalive_time_ms': 30_000,
-    })
-    const client = new Ctor(address, grpc.credentials.createInsecure(), {
-      'grpc.max_receive_message_length': -1,
-      'grpc.max_send_message_length': -1,
-    })
+    const credentials = buildChannelCredentials(tls, useTls)
+    const channelArgs = buildChannelArgs(tls, useTls)
+    const channel = new grpc.Client(address, credentials, channelArgs)
+    const client = new Ctor(address, credentials, channelArgs)
     const nebula = new NebulaClient(channel, client, options)
     try {
       await nebula.authenticate(signal)
       return nebula
     } catch (err) {
+      if (tls.mode === 'auto' && err instanceof NebulaError && err.kind === 'transport') {
+        // The server never completed a TLS handshake (plaintext listener, or
+        // an untrusted certificate). Fall back to plaintext so servers
+        // without TLS stay reachable — but only for transport-level failures:
+        // a wrong password must never silently downgrade to plaintext.
+        const plain = grpc.credentials.createInsecure()
+        const plainArgs = buildChannelArgs(undefined, false)
+        const plainChannel = new grpc.Client(address, plain, plainArgs)
+        const plainClient = new Ctor(address, plain, plainArgs)
+        const fallback = new NebulaClient(plainChannel, plainClient, options)
+        fallback.usedTlsFallback = true
+        try {
+          await fallback.authenticate(signal)
+          return fallback
+        } catch (fallbackErr) {
+          await fallback.close()
+          throw fallbackErr
+        }
+      }
       await nebula.close()
+      if (tls.mode === 'on' && err instanceof NebulaError && err.kind === 'transport') {
+        // `tls: on` failed at the transport level: the server did not complete
+        // a TLS handshake (plaintext listener, untrusted certificate, or a
+        // TLS/version mismatch). Retrying with different host/user/port
+        // parameters cannot fix this — it is a TLS policy or server
+        // configuration issue, so surface that instead of a generic gRPC error.
+        throw new NebulaError(
+          `TLS connection to ${address} failed: the server did not complete a TLS handshake`
+          + ` (${err.message}). tls is set to "on" so plaintext fallback is disabled.`
+          + ' This is a server-side TLS / certificate configuration issue, not a credential or'
+          + ' address problem — retrying with different host, user, or port parameters will not'
+          + ' succeed. Verify the server has TLS enabled and its certificate is trusted (or'
+          + ' configure ca/servername), or set tls to "auto"/"off" to allow plaintext.',
+          'transport',
+        )
+      }
       throw err
     }
   }
+
+  /**
+   * Whether the TLS probe failed and the connection fell back to plaintext
+   * (only possible in `auto` mode). Callers should surface this as a warning.
+   */
+  usedTlsFallback = false
 
   private async authenticate(signal?: AbortSignal): Promise<void> {
     const authInfo = JSON.stringify({ password: this.options.password })
@@ -309,6 +416,9 @@ export class NebulaClient {
     }
     this.sessionId = resp.session_id
     this.serverVersion = resp.version.toString()
+    // The password is only needed for the one-time authenticate call. Clear
+    // it now so it never lingers in memory for the connection's lifetime.
+    this.options.password = ''
   }
 
   /** Server version string reported at authentication. */

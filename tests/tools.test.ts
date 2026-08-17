@@ -228,10 +228,11 @@ function startFakeServer(): Promise<{ port: number; close: () => Promise<void>; 
 }
 
 /** A minimal stub context exposing just what the plugin's `apply` touches. */
-function stubContext() {
+function stubContext(options?: { credentials?: Record<string, string> }) {
   const registered = new Map<string, ToolDefinition>()
   const sections: { name: string; order: number; text: string }[] = []
   const disposers: (() => void)[] = []
+  const credentialsStore = options?.credentials ?? {}
   const ctx = {
     tools: {
       register: (tool: ToolDefinition): void => {
@@ -245,6 +246,17 @@ function stubContext() {
     },
     skills: {
       registerProvider: (): (() => void) => () => {},
+    },
+    get: <T,>(key: string): T | undefined => {
+      if (key === 'credentials') {
+        return {
+          resolve: async (ref: string): Promise<{ value: string } | undefined> => {
+            const value = credentialsStore[ref]
+            return value !== undefined ? { value } : undefined
+          },
+        } as T
+      }
+      return undefined
     },
     effect: (cb: () => () => void): (() => void) => {
       const disposer = cb()
@@ -271,10 +283,71 @@ describe('dsh-nebula plugin', () => {
     assert.ok(sections.some((s) => s.name === 'tool:nebula'))
   })
 
+  it('never exposes a password tool argument; resolves it from passwordRef instead', async () => {
+    const { ctx, registered } = stubContext({ credentials: { NEBULA_TEST_PASSWORD: 'secret' } })
+    apply(ctx as never, Config({}))
+
+    const connectTool = registered.get('nebula_connect')!
+    // The model-facing schema must NOT accept a password value — the model can
+    // never see or pass the secret; it only names a credential reference.
+    const params = (connectTool.parameters as Record<string, unknown>).properties as Record<string, unknown>
+    assert.ok(!('password' in params), 'nebula_connect must not take a password argument')
+    assert.ok('passwordRef' in params, 'nebula_connect takes a passwordRef (credential reference)')
+    // TLS knobs are exposed so the caller can choose the transport policy.
+    assert.ok('tls' in params)
+
+    // An unresolvable passwordRef fails loudly instead of silently connecting
+    // with an empty password.
+    const fakeServer = await startFakeServer()
+    try {
+      await assert.rejects(
+        () => runExec(connectTool, { host: '127.0.0.1', port: fakeServer.port, user: 'root', passwordRef: 'NOPE' }),
+        /passwordRef "NOPE" did not resolve to a value/,
+      )
+    } finally {
+      await fakeServer.close()
+    }
+  })
+
+  it('enforces a non-auto tls config policy: tool arguments cannot downgrade it', async () => {
+    // Plugin config enforces tls: "on". The model-facing tool must NOT be
+    // able to relax it (e.g. tls: "auto" would fall back to plaintext and
+    // defeat the admin's transport policy).
+    const { ctx, registered } = stubContext({ credentials: { NEBULA_TEST_PASSWORD: 'secret' } })
+    apply(ctx as never, Config({ tls: 'on' }))
+
+    const connectTool = registered.get('nebula_connect')!
+    // Passing a conflicting tls argument is rejected outright.
+    await assert.rejects(
+      () => runExec(connectTool, { host: '192.168.8.187', port: 39669, user: 'root', tls: 'auto' }),
+      /tls is enforced as "on" by plugin config and cannot be overridden to "auto"/,
+    )
+    await assert.rejects(
+      () => runExec(connectTool, { host: '192.168.8.187', port: 39669, user: 'root', tls: 'off' }),
+      /tls is enforced as "on" by plugin config and cannot be overridden to "off"/,
+    )
+    // Omitting tls (or passing the same value) passes argument validation —
+    // the connection then fails for network reasons, NOT with a policy error.
+    await assert.rejects(
+      () => runExec(connectTool, { host: '192.168.8.187', port: 1, user: 'root', tls: 'on', timeoutMs: 500 }),
+      (err: unknown) => !/cannot be overridden/.test((err as Error).message),
+    )
+
+    // Symmetric for tls: "off": downgrading is the only direction that matters,
+    // but conflicting overrides are rejected in both directions.
+    const ctx2 = stubContext({ credentials: { NEBULA_TEST_PASSWORD: 'secret' } })
+    apply(ctx2.ctx as never, Config({ tls: 'off' }))
+    const connectTool2 = ctx2.registered.get('nebula_connect')!
+    await assert.rejects(
+      () => runExec(connectTool2, { host: '192.168.8.187', port: 39669, user: 'root', tls: 'auto' }),
+      /tls is enforced as "off" by plugin config and cannot be overridden to "auto"/,
+    )
+  })
+
   it('connects, executes, and disconnects end-to-end', async () => {
     const fakeServer = await startFakeServer()
     try {
-      const { ctx, registered, disposers } = stubContext()
+      const { ctx, registered, disposers } = stubContext({ credentials: { NEBULA_TEST_PASSWORD: 'secret' } })
       apply(ctx as never, Config({}))
 
       const connectTool = registered.get('nebula_connect')!
@@ -285,11 +358,14 @@ describe('dsh-nebula plugin', () => {
         host: '127.0.0.1',
         port: fakeServer.port,
         user: 'root',
-        password: 'secret',
-      })) as { connectionId: string; serverVersion: string; host: string; port: number }
+        passwordRef: 'NEBULA_TEST_PASSWORD',
+      })) as { connectionId: string; serverVersion: string; host: string; port: number; tlsFallback?: boolean }
       assert.equal(connected.serverVersion, '5.0.0')
       assert.equal(connected.port, fakeServer.port)
       assert.ok(connected.connectionId.length > 0)
+      // The fake server is plaintext, so auto mode falls back; the caller is
+      // told (tlsFallback: true) instead of the failure being hidden.
+      assert.equal(connected.tlsFallback, true)
 
       const result = (await runExec(executeTool, { connectionId: connected.connectionId, gql: 'SHOW GRAPHS' })) as {
         ok: boolean
@@ -328,7 +404,7 @@ describe('dsh-nebula plugin', () => {
   it('resolves node primary keys from DESC GRAPH TYPE for graph results', async () => {
     const fakeServer = await startFakeServer()
     try {
-      const { ctx, registered } = stubContext()
+      const { ctx, registered } = stubContext({ credentials: { NEBULA_TEST_PASSWORD: 'secret' } })
       apply(ctx as never, Config({}))
 
       const connectTool = registered.get('nebula_connect')!
@@ -337,7 +413,7 @@ describe('dsh-nebula plugin', () => {
         host: '127.0.0.1',
         port: fakeServer.port,
         user: 'root',
-        password: 'secret',
+        passwordRef: 'NEBULA_TEST_PASSWORD',
       })) as { connectionId: string }
 
       const result = (await runExec(executeTool, {
@@ -367,7 +443,7 @@ describe('dsh-nebula plugin', () => {
   it('introspects a graph schema with nebula_schema (SESSION SET graph + explicit graph)', async () => {
     const fakeServer = await startFakeServer()
     try {
-      const { ctx, registered } = stubContext()
+      const { ctx, registered } = stubContext({ credentials: { NEBULA_TEST_PASSWORD: 'secret' } })
       apply(ctx as never, Config({}))
 
       const connectTool = registered.get('nebula_connect')!
@@ -378,7 +454,7 @@ describe('dsh-nebula plugin', () => {
         host: '127.0.0.1',
         port: fakeServer.port,
         user: 'root',
-        password: 'secret',
+        passwordRef: 'NEBULA_TEST_PASSWORD',
       })) as { connectionId: string }
 
       // Switching the working graph is tracked: an explicit SESSION SET graph

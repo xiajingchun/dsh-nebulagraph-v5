@@ -151,6 +151,10 @@ describe('NebulaClient over gRPC', () => {
         authInfo: JSON.stringify({ password: 'secret' }),
         lang: 'JAVASCRIPT',
       })
+      // The password is cleared from the options object right after
+      // authentication, so it never lingers in memory (or the registry) for
+      // the connection's lifetime.
+      assert.equal((client as unknown as { options: { password: string } }).options.password, '')
 
       const result = await client.execute('SHOW GRAPHS')
       assert.equal(result.ok, true)
