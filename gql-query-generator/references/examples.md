@@ -201,6 +201,36 @@ RETURN p1, p2
 
 改写要点：`WHERE` 中的图模式包含/排除过滤用 `EXISTS { MATCH ... }` / `NOT EXISTS { MATCH ... }`，不要把裸 pattern 当成布尔条件。凡是自然语言里出现“但不是/不是…的人/没有…关系/排除…模式/without/but not”，都先识别成“主模式 + `NOT EXISTS` 排除子模式”。
 
+### 1I. Default return of complete graph elements (G6 visualization)
+Input intent:
+- 返回星球大战的导演和演员
+- 提到节点/边类型时，默认返回完整元素（含全部属性与边），供 Web Client 以 G6 图渲染
+
+Output skeleton:
+```gql
+MATCH (m:<MovieTag>{title: 'Star Wars'})<-[e1:<ACTED_IN>]-(a:<ActorTag>),
+      (m)<-[e2:<DIRECTED>]-(d:<DirectorTag>)
+RETURN DISTINCT m, a, d, e1, e2
+```
+
+Input intent（明确要求属性列时才投影）:
+- 只返回导演的 name
+
+Output skeleton:
+```gql
+MATCH (m:<MovieTag>{title: 'Star Wars'})<-[e2:<DIRECTED>]-(d:<DirectorTag>)
+RETURN DISTINCT d.<name> AS name
+```
+
+Anti-pattern（不要生成——用户要“导演和演员”时不能擅自只返回名字，会丢失点与边，G6 无法完整渲染）:
+```gql
+MATCH (m:<MovieTag>{title: 'Star Wars'})<-[e1:<ACTED_IN>]-(a:<ActorTag>),
+      (m)<-[e2:<DIRECTED>]-(d:<DirectorTag>)
+RETURN d.<name> AS director_name, a.<name> AS actor_name
+```
+
+改写要点：自然语言提到“返回 <节点/边类型>”（如导演、演员、边）时，RETURN 默认回传完整图元素——pattern 的节点变量、边变量（或路径变量），Web Client 会自动把它们渲染成可交互的 G6 图；只有明确说“返回 X 的 <属性>”（如“导演的 name”）时才投影属性列。
+
 ### 2. Sorted page query
 Input intent:
 - 查最近创建的 20 条订单，跳过前 40 条

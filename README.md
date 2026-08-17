@@ -37,7 +37,12 @@ an ngql-style ASCII table render.
   contains nodes, edges, or paths, the result is projected into a replayable
   graph payload and the bundled Web Client plugin renders it as an interactive
   [AntV G6](https://g6.antv.antgroup.com/) graph (drag / zoom / hover),
-  alongside the normal table output. `nebula_schema` results render as a
+  alongside the normal table output. To feed this renderer, the bundled
+  `gql-query-generator` skill defaults `RETURN` to the **complete graph
+  elements** whenever a prompt asks to return a node type or edge type (e.g.
+  "return Star Wars directors and actors") — the pattern's node and edge
+  variables (or the path variable) — and only projects a specific property
+  (e.g. `name`) when the prompt explicitly asks for it. `nebula_schema` results render as a
   **schema meta-graph**: node types become card vertices (name, labels,
   🔑 primary key, properties) and edge types become arcs between their
   pattern's source/target node types, laid out with a layered dagre layout.

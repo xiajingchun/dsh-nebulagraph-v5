@@ -126,6 +126,7 @@ RETURN *
 - 别名用 `AS`；需去重用 `DISTINCT`。
 - `count(*)`、`count(DISTINCT <expr>)`。
 - 只在用户要所有列时用 `RETURN *`。
+- **默认返回完整图元素**：用户提到“返回某节点/边类型”（如“返回导演和演员”）时，RETURN 默认回传 pattern 中的节点变量与边变量（或路径变量），不要擅自只返回某个属性（如 name）；仅当用户明确指定某个属性（如“导演的 name”）时才投影属性列。完整元素让 Web Client 能以 G6 渲染点与边。
 
 ### Aggregation & GROUP BY
 ```gql
