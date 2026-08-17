@@ -14,6 +14,8 @@ import { formatValue, renderTable } from './format.ts'
 import { extractGraphData } from './graphData.ts'
 import type { GraphProjection } from './graphData.ts'
 import type { ConnectionEntry, ConnectionRegistry } from './registry.ts'
+import { resolveInstanceSource } from './instances.ts'
+import type { NebulaInstance, NebulaInstanceSettings } from './instances.ts'
 import { buildSchemaGraphMeta, collectGraphSchema, formatSchemaOverview, parseGraphTypeDesc, parseShowGraphs, sessionSetGraph } from './schema.ts'
 
 /** A credential reference is a POSIX shell identifier (same rule as the DSH credentials seam). */
@@ -58,6 +60,13 @@ export interface NebulaToolDefaults {
 
 /** Argument shape of `nebula_connect`. */
 export interface ConnectArgs {
+  /**
+   * Alias of a NebulaGraph instance profile configured in Settings →
+   * NebulaGraph (e.g. `prod`). Resolves host/port/user/passwordRef/tls from
+   * the profile; per-call arguments still override the profile. Omit to use
+   * the configured default instance, then plugin config.
+   */
+  instance?: string
   host?: string
   port?: number
   user?: string
@@ -85,42 +94,87 @@ export interface DisconnectArgs {
   connectionId: string
 }
 
-function resolveConnectArgs(args: ConnectArgs, defaults: NebulaToolDefaults): Omit<Required<ConnectArgs>, 'passwordRef' | 'ca'> & { passwordRef?: string; ca?: string } {
+/**
+ * Resolve one connect call's effective parameters.
+ *
+ * The base values come from the instance profile addressed by `instance`
+ * (or the settings default), falling back to plugin config; per-call tool
+ * arguments override on top of that. A non-auto TLS policy in the ACTIVE
+ * configuration (the resolved profile, else plugin config) is an ENFORCED
+ * transport policy: the model-facing tool argument must not weaken it.
+ *
+ * @param args - the tool's arguments.
+ * @param defaults - resolved plugin-config defaults.
+ * @param instanceSettings - the current `dsh-nebula` settings section.
+ * @returns the effective input plus the resolved profile provenance.
+ */
+function resolveConnectArgs(
+  args: ConnectArgs,
+  defaults: NebulaToolDefaults,
+  instanceSettings: NebulaInstanceSettings,
+): {
+  input: Omit<Required<ConnectArgs>, 'passwordRef' | 'ca' | 'instance'> & { passwordRef?: string; ca?: string }
+  source: { instance?: NebulaInstance; viaDefault?: boolean; warning?: string }
+} {
+  const source = resolveInstanceSource(args.instance?.trim(), instanceSettings)
+  const instance = source.instance
+  const baseHost = instance?.host ?? defaults.host
+  const basePort = instance?.port ?? defaults.port
+  const baseUser = instance?.user ?? defaults.user
+  const basePasswordRef = instance?.passwordRef ?? defaults.passwordRef
+  const baseTls = instance?.tls ?? defaults.tls
+  const baseCa = instance?.ca ?? defaults.ca
+  const baseTimeoutMs = instance?.timeoutMs ?? defaults.timeoutMs
+  const sourceLabel = instance !== undefined ? `instance "${instance.alias}"` : 'plugin config'
+
   if (args.host !== undefined && args.host.trim().length === 0) throw new Error('host must be a non-empty string')
-  const port = args.port ?? defaults.port
+  const port = args.port ?? basePort
   if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error(`port must be an integer in [1, 65535], got ${port}`)
-  const timeoutMs = args.timeoutMs ?? defaults.timeoutMs
+  const timeoutMs = args.timeoutMs ?? baseTimeoutMs
   if (!Number.isInteger(timeoutMs) || timeoutMs < 1) throw new Error('timeoutMs must be a positive integer')
-  let tls = args.tls ?? defaults.tls
+  let tls = args.tls ?? baseTls
   if (tls !== 'off' && tls !== 'on' && tls !== 'auto') throw new Error(`tls must be "off", "on", or "auto", got ${tls}`)
-  // A non-auto tls in plugin config is an ENFORCED transport policy: the
-  // model-facing tool argument must not weaken it (e.g. tls: "on" → "auto"
-  // would silently downgrade to plaintext and defeat the admin's intent).
-  // The tool may only choose tls when the config leaves it flexible ("auto").
-  if (args.tls !== undefined && defaults.tls !== 'auto' && args.tls !== defaults.tls) {
+  // A non-auto tls in the active configuration is an ENFORCED transport
+  // policy: the model-facing tool argument must not weaken it (e.g.
+  // tls: "on" → "auto" would silently downgrade to plaintext and defeat the
+  // admin's intent). The tool may only choose tls when the active
+  // configuration leaves it flexible ("auto").
+  if (args.tls !== undefined && baseTls !== 'auto' && args.tls !== baseTls) {
     throw new Error(
-      `tls is enforced as "${defaults.tls}" by plugin config and cannot be overridden to "${args.tls}" by a tool argument;`
-      + ' change the plugin config if a different transport policy is intended',
+      `tls is enforced as "${baseTls}" by ${sourceLabel} and cannot be overridden to "${args.tls}" by a tool argument;`
+      + ' change the instance settings or plugin config if a different transport policy is intended',
     )
   }
   return {
-    host: args.host ?? defaults.host,
-    port,
-    user: args.user ?? defaults.user,
-    passwordRef: args.passwordRef ?? defaults.passwordRef,
-    tls,
-    ca: args.ca ?? defaults.ca,
-    timeoutMs,
+    input: {
+      host: args.host ?? baseHost,
+      port,
+      user: args.user ?? baseUser,
+      passwordRef: args.passwordRef ?? basePasswordRef,
+      tls,
+      ca: args.ca ?? baseCa,
+      timeoutMs,
+    },
+    source,
   }
 }
 
-/** TLS options for one connection, merging per-call overrides with defaults. */
-function resolveTlsOptions(input: ReturnType<typeof resolveConnectArgs>, defaults: NebulaToolDefaults): TlsOptions {
+/** TLS options for one connection, merging the resolved profile with per-call overrides. */
+function resolveTlsOptions(
+  input: { tls: TlsMode; ca?: string },
+  defaults: NebulaToolDefaults,
+  source: { instance?: NebulaInstance },
+): TlsOptions {
   const tls: TlsOptions = { mode: input.tls }
-  if (input.ca !== undefined && input.ca.trim().length > 0) tls.ca = input.ca
-  if (defaults.cert !== undefined && defaults.cert.length > 0) tls.cert = defaults.cert
-  if (defaults.key !== undefined && defaults.key.length > 0) tls.key = defaults.key
-  if (defaults.servername !== undefined && defaults.servername.length > 0) tls.servername = defaults.servername
+  const instance = source.instance
+  const ca = input.ca ?? instance?.ca
+  if (ca !== undefined && ca.trim().length > 0) tls.ca = ca
+  const cert = instance?.cert ?? defaults.cert
+  if (cert !== undefined && cert.length > 0) tls.cert = cert
+  const key = instance?.key ?? defaults.key
+  if (key !== undefined && key.length > 0) tls.key = key
+  const servername = instance?.servername ?? defaults.servername
+  if (servername !== undefined && servername.length > 0) tls.servername = servername
   return tls
 }
 
@@ -167,14 +221,23 @@ function formatConnectOutput(result: {
   user: string
   serverVersion: string
   tlsFallback?: boolean
+  instance?: string
+  viaDefault?: boolean
+  warning?: string
 }): string {
+  const where = result.instance !== undefined
+    ? ` (instance "${result.instance}"${result.viaDefault === true ? ', default' : ''})`
+    : ''
   const lines = [
-    `Connected to NebulaGraph at ${result.host}:${result.port} as ${result.user}.`,
+    `Connected to NebulaGraph at ${result.host}:${result.port} as ${result.user}${where}.`,
     `Server version: ${result.serverVersion}`,
     `Connection id: ${result.connectionId} — pass it to nebula_execute to run queries.`,
   ]
   if (result.tlsFallback === true) {
     lines.push('Warning: the server did not complete a TLS handshake; connected over plaintext (insecure). Set tls: "on" to require TLS.')
+  }
+  if (result.warning !== undefined && result.warning.length > 0) {
+    lines.push(`Warning: ${result.warning}`)
   }
   return lines.join('\n')
 }
@@ -300,12 +363,15 @@ async function resolveElementKeys(
 }
 
 /**
- * Register the three NebulaGraph tools on `ctx.tools`.
+ * Register the NebulaGraph tools on `ctx.tools`.
  *
  * @param ctx - the plugin context (must expose `ctx.tools` and, when
  *   available, the optional `ctx.credentials` seam).
  * @param registry - the shared connection registry.
  * @param defaults - resolved plugin-config defaults.
+ * @param instanceSettings - reads the current `dsh-nebula` settings section
+ *   (instance profiles by alias); falls back to an empty section when no
+ *   settings provider is composed.
  * @returns the registration disposer (usually left to the effect registry).
  */
 export function applyNebulaTools(
@@ -315,16 +381,18 @@ export function applyNebulaTools(
   },
   registry: ConnectionRegistry,
   defaults: NebulaToolDefaults,
+  instanceSettings: () => NebulaInstanceSettings = () => ({ instances: [] }),
 ): void {
   ctx.tools.register(defineTool({
     name: 'nebula_connect',
-    description: 'Connect to a NebulaGraph server and start a session. Returns a connectionId to use with nebula_execute. Host/port/user default to plugin config. The password is resolved per connection from the configured passwordRef (via the DSH credentials seam or the environment) — never pass a password as a tool argument. TLS defaults to "auto": try TLS, then fall back to plaintext when the server has no TLS listener; set tls to "on" to require TLS, or "off" for plaintext only. If a connection with tls: "on" fails, the server does not speak TLS or its certificate is untrusted — do NOT retry with different host/user/port/tls arguments, that cannot fix it; report the error to the user instead. When plugin config enforces a non-auto tls policy (tls: "on" or "off"), the tls argument cannot override it — the enforced policy applies and a conflicting tls argument is rejected.',
+    description: 'Connect to a NebulaGraph server and start a session. Returns a connectionId to use with nebula_execute. To use a pre-configured instance, pass its alias as the `instance` argument (e.g. instance: "prod") — host/port/user/passwordRef/tls then come from that profile; otherwise the instance marked as default in Settings is used, then plugin config. Per-call host/port/user/passwordRef/tls/ca/timeoutMs still override the profile. The password is resolved per connection from the configured passwordRef (via the DSH credentials seam or the environment) — never pass a password as a tool argument. TLS defaults to "auto": try TLS, then fall back to plaintext when the server has no TLS listener; set tls to "on" to require TLS, or "off" for plaintext only. If a connection with tls: "on" fails, the server does not speak TLS or its certificate is untrusted — do NOT retry with different host/user/port/tls arguments, that cannot fix it; report the error to the user instead. When the active instance or plugin config enforces a non-auto tls policy (tls: "on" or "off"), the tls argument cannot override it — the enforced policy applies and a conflicting tls argument is rejected.',
     parameters: {
-      host: { type: 'string', description: 'Graphd host (defaults to plugin config, 127.0.0.1).' },
+      instance: { type: 'string', description: 'Alias of a configured NebulaGraph instance (Settings → NebulaGraph). Unknown aliases are rejected and the error lists the configured aliases.' },
+      host: { type: 'string', description: 'Graphd host (defaults to the instance profile, then plugin config, 127.0.0.1).' },
       port: { type: 'number', description: 'Graphd gRPC port (defaults to 9669).' },
-      user: { type: 'string', description: 'Login user name (defaults to plugin config, root).' },
+      user: { type: 'string', description: 'Login user name (defaults to root).' },
       passwordRef: { type: 'string', description: 'Credential reference (environment variable name) resolving to this connection\'s password; overrides the configured default. The password value itself is never a tool argument.' },
-      tls: { type: 'string', description: 'TLS mode: "auto" (default, try TLS then fall back to plaintext), "on" (require TLS — failure means the server has no TLS or an untrusted certificate, do not retry), or "off" (plaintext). Ignored/rejected when plugin config enforces a non-auto tls policy.' },
+      tls: { type: 'string', description: 'TLS mode: "auto" (default, try TLS then fall back to plaintext), "on" (require TLS — failure means the server has no TLS or an untrusted certificate, do not retry), or "off" (plaintext). Ignored/rejected when the active instance or plugin config enforces a non-auto tls policy.' },
       ca: { type: 'string', description: 'CA bundle (PEM) for verifying the server certificate, when it is not trusted by the system roots.' },
       timeoutMs: { type: 'number', description: 'Connect/auth timeout in milliseconds (default 30000).' },
     },
@@ -339,18 +407,21 @@ export function applyNebulaTools(
           user: { type: 'string' },
           serverVersion: { type: 'string' },
           tlsFallback: { type: 'boolean' },
+          instance: { type: 'string' },
+          viaDefault: { type: 'boolean' },
+          warning: { type: 'string' },
         },
       },
       render: (_args, value) => [{ type: 'text', text: formatConnectOutput(value as never) }],
     },
     timeoutMs: 60_000,
     async execute(args, exec) {
-      const input = resolveConnectArgs(args as ConnectArgs, defaults)
+      const { input, source } = resolveConnectArgs(args as ConnectArgs, defaults, instanceSettings())
       if (registry.list().length >= defaults.maxConnections) {
         throw new Error(`connection limit reached (${defaults.maxConnections}); disconnect an idle connection first (nebula_disconnect)`)
       }
       const password = await resolvePassword(ctx, input.passwordRef, defaults.password)
-      const tls = resolveTlsOptions(input, defaults)
+      const tls = resolveTlsOptions(input, defaults, source)
       // The same options object is passed to the client AND stored in the
       // registry: `authenticate` clears `password` on it after success, so
       // the plaintext never lingers in either the client or the registry.
@@ -364,6 +435,9 @@ export function applyNebulaTools(
         user: input.user,
         serverVersion: client.serverVersion,
         tlsFallback: client.usedTlsFallback || undefined,
+        ...source.instance === undefined ? {} : { instance: source.instance.alias },
+        ...source.viaDefault === true ? { viaDefault: true } : {},
+        ...source.warning === undefined ? {} : { warning: source.warning },
       }
     },
   }))

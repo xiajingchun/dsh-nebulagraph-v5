@@ -22,6 +22,13 @@ an ngql-style ASCII table render.
 - Connect / authenticate against a graphd (`nebula_connect`), execute GQL on
   the same server-side session (`nebula_execute`), and close it
   (`nebula_disconnect`).
+- **Named instance profiles (Settings → NebulaGraph)**: manage any number of
+  connection presets in the DSH settings page — each with its own
+  host/port/user/passwordRef/TLS policy — addressed by a short alias. The
+  model then just says *"connect to the `prod` Nebula"* and calls
+  `nebula_connect(instance: "prod")`; the profile supplies the parameters.
+  An instance can be marked as the default, used when no alias is given.
+  Per-call tool arguments still override the profile.
 - Decodes the columnar `VectorResultTable` payload exactly like the official
   nebula-go v5 client: scalars, strings, temporal values, lists, sets, maps,
   records, vertices, edges, paths, embedding vectors, geography, `Any`-typed
@@ -98,7 +105,7 @@ an ngql-style ASCII table render.
 
 | Tool | Purpose |
 | --- | --- |
-| `nebula_connect` | Connect to a graphd and open a session. Arguments: `host`, `port`, `user`, `passwordRef`, `tls`, `ca`, `timeoutMs` (all optional, defaulting to plugin config). The password itself is never an argument — it resolves from `passwordRef` via the DSH credentials seam / environment. Returns a `connectionId` (plus `tlsFallback` when the server had no TLS). |
+| `nebula_connect` | Connect to a graphd and open a session. Arguments: `instance` (alias of a profile configured in Settings → NebulaGraph), `host`, `port`, `user`, `passwordRef`, `tls`, `ca`, `timeoutMs` (all optional). Resolution order: explicit `instance` alias → the default instance (if set) → plugin config; per-call arguments override the profile. The password itself is never an argument — it resolves from `passwordRef` via the DSH credentials seam / environment. Returns a `connectionId` (plus `instance`, `viaDefault`, `warning`, and `tlsFallback` when relevant). |
 | `nebula_execute` | Run one GQL statement on a connection. Arguments: `connectionId` (required), `gql` (required), `timeoutMs`. Returns `{ ok, columns, rows, numRows, latencyUs, summary?, error? }`. |
 | `nebula_schema` | Introspect a graph's schema. Arguments: `connectionId` (required), `graph` (optional — defaults to the session working graph, then the sole graph). Runs `SHOW GRAPHS` + `DESC GRAPH TYPE`, returns `{ graphs, graph, nodes, edges, … }`. Read-only. |
 | `nebula_disconnect` | Close a connection and release its server-side session. |
@@ -212,6 +219,55 @@ NEBULA_PASSWORD: s3cr3t
 The password is resolved per connection at `nebula_connect` time and cleared
 from memory immediately after authentication succeeds.
 
+## Instance profiles (Settings → NebulaGraph)
+
+When the profile composes a settings provider (the Web GUI does), the plugin
+registers a **`dsh-nebula`** settings namespace and a **Settings →
+NebulaGraph** page. There you can:
+
+- **Add** connection presets — each with an **alias** (letters/digits/`_`/`-`,
+  ≤ 64 chars), host, port, user, `passwordRef`, TLS mode, per-instance
+  CA / client cert / key / servername, `timeoutMs`, and a note.
+- **Edit / delete** presets and **mark one as the default**.
+- **Manage the credential values** behind the `passwordRef`s from the same
+  page: every reference the instances name (plus extra references you add,
+  e.g. the plugin-config default's) gets a write-only password field and a
+  clear button. Values are written through the harness **credentials RPC**
+  (`credentials.set` / `credentials.unset`) and persisted to the DSH
+  credentials document (`~/.dsh/.credentials.yaml`). The page only ever shows
+  whether a value is configured — never the value itself — and inputs always
+  start blank.
+- Passwords never enter the settings document: only the `passwordRef`
+  (credential reference / environment variable name) is stored, and it is
+  resolved through the DSH credentials seam at connect time like the
+  plugin-config default.
+
+`nebula_connect` resolution order:
+
+1. explicit `instance: <alias>` — an unknown alias is a hard error that lists
+   the configured aliases;
+2. the **default** instance, when one is set (the connect output reports
+   `viaDefault: true`; a stale default referencing a deleted instance falls
+   back to plugin config with a `warning`);
+3. plugin config (`cordis.patch.yml`).
+
+Per-call `host`/`port`/`user`/`passwordRef`/`tls`/`ca`/`timeoutMs` arguments
+still override the resolved profile. A non-`auto` TLS mode inside a profile is
+an enforced transport policy exactly like plugin config: a conflicting `tls`
+tool argument is rejected.
+
+The page is implemented by the plugin's Web Client bundle
+(`client/NebulaInstancesSection.tsx`), which reads and writes the namespace
+through a **plugin-owned Web route** (`/dsh-nebula/api`, see
+`src/instances-api.ts`) with the same browser-trust fence as the harness
+gateway. A plugin-owned route is required because the harness's own settings
+RPC (`api.settings.*`) serves only namespaces on its explicit exposure
+allowlist — the established third-party pattern in this deployment
+(`dsh-better-sidebar`'s `/sidebar/api`). The host reads the same namespace at
+connect time (`src/instances.ts`). Without a settings provider or a web
+surface the route simply never mounts and the plugin keeps working on plugin
+config alone.
+
 ## Development
 
 ```sh
@@ -248,6 +304,13 @@ beyond `@grpc/grpc-js`, `@grpc/proto-loader`, and `schemastery`.
   encoding).
 - **Registry** — open connections live in a per-plugin registry; disposing the
   plugin closes them all.
+- **Instance profiles** — the `dsh-nebula` settings namespace is registered
+  through `installSettingsSection` with the plugin config as the composition
+  base: without a settings provider the tools read an empty section and fall
+  back to config exactly as before, while the Web GUI edits the same
+  namespace over the plugin-owned `/dsh-nebula/api` route. Alias resolution
+  and validation are pure functions in `src/instances.ts`, shared by the
+  tools and the settings surface contract.
 
 ## License
 

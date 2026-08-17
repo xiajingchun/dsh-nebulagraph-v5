@@ -72,7 +72,7 @@
     "pretest": "node scripts/copy-proto.mjs",
     "typecheck": "tsc --noEmit",
     "typecheck:client": "tsc -p tsconfig.client.json",
-    "test": "node --import tsx --test tests/*.test.ts",
+    "test": "TSX_TSCONFIG_PATH=tsconfig.tests.json node --import tsx --test tests/*.test.ts tests/*.test.tsx",
     "prepublishOnly": "pnpm build && pnpm test",
     "prepare": "pnpm build"
   },
@@ -82,6 +82,7 @@
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.1",
+    "@deepseek-ai/dsh-settings": "^0.1.0-rc.5",
     "@deepseek-ai/dsh-skill": "^0.1.0-rc.5",
     "@deepseek-ai/dsh-tools": "^0.1.0-rc.5"
   },
@@ -97,11 +98,15 @@
     "@deepseek-ai/dsh-client-runtime": "^0.1.0-rc.6",
     "@deepseek-ai/dsh-client-ui-conversation": "^0.1.0-rc.6",
     "@deepseek-ai/dsh-client-ui-slots": "^0.1.0-rc.6",
+    "@deepseek-ai/dsh-settings": "^0.1.0-rc.6",
     "@deepseek-ai/dsh-skill": "^0.1.0-rc.6",
     "@deepseek-ai/dsh-tools": "^0.1.0-rc.6",
     "@types/node": "^24.0.0",
     "@types/react": "^18.3.0",
     "esbuild": "^0.28.2",
+    "react": "18.3.1",
+    "react-dom": "18.3.1",
+    "react-test-renderer": "18.3.1",
     "tsx": "^4.19.0",
     "typescript": "^5.9.0"
   }

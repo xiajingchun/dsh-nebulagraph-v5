@@ -20,6 +20,39 @@ import type {
   ConversationNodeDefinition,
 } from '@deepseek-ai/dsh-client-runtime/client'
 import type { ChatNodeViewProps } from '@deepseek-ai/dsh-client-ui-conversation/client'
+// Type-only: pulls the settings slot-contract declarations (SlotMap's
+// 'settings.section' entry and the owner props) into this compilation.
+// Erased at build time — the client bundle never requires the settings
+// package at runtime.
+import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
+// Type-only: the ctx.locale service declaration (the runtime service comes
+// from the composition; this module only needs the Context merge).
+import type {} from '@deepseek-ai/dsh-client-locale/client'
+import { NebulaInstancesSection } from './NebulaInstancesSection.tsx'
+import type { NebulaInstanceSettings } from './nebula-instances.ts'
+import { instancesApi } from './instances-api.ts'
+import type { InstancesView } from './instances-api.ts'
+import { en, zh } from './locales.ts'
+import type { NebulaLocaleKey } from './locales.ts'
+
+declare module '@deepseek-ai/dsh-client-ui-slots' {
+  interface LocaleNamespaceMap {
+    /** NebulaGraph instance-profiles settings copy. */
+    'settings.nebula': NebulaLocaleKey
+  }
+}
+
+/** Dictionary namespace owned by this plugin (registered on ctx.locale). */
+export const NS = 'settings.nebula'
+
+/**
+ * Wire contract with the host plugin (`src/index.ts`): the settings namespace
+ * the section reads and writes, and the plugin-owned API route backing it.
+ * The host registers the namespace as `NEBULA_SETTINGS_NAMESPACE`; the client
+ * names it by the same literal (used to filter forwarded document-updated
+ * events) and calls `/dsh-nebula/api/*`.
+ */
+const NEBULA_SETTINGS_NAMESPACE = 'dsh-nebula'
 
 /** Graph payload projected by the host `nebula_execute` tool. */
 interface GraphProjection {
@@ -780,13 +813,117 @@ function NebulaGraphView({ node }: { node: ChatNodeViewProps<'nebula-graph'>['no
 }
 
 /** Client services required by this plugin. */
-export const inject = ['conversationEvents', 'slots']
+export const inject = ['conversationEvents', 'slots', 'locale']
 
-/** Mount the conversation node definition and the keyed Chat renderer. */
+/**
+ * Forwarded `settings/document-updated` event face (structural — the remote
+ * gateway provides it; absent in non-web environments the subscription is a
+ * no-op, which only costs multi-tab freshness).
+ */
+interface RemoteLike {
+  $on(event: 'settings/document-updated' | 'credentials/updated', listener: (ns: string, revision: number) => void): () => void
+}
+
+/** The harness credentials RPC face (structural; values never return). */
+interface CredentialsApiLike {
+  describe(request: { refs: string[] }): Promise<{ result: { ok: boolean; value: { credentials: Record<string, { configured: boolean; writable: boolean }> } } }>
+  set(request: { ref: string; value: string }): Promise<{ result: { ok: boolean } }>
+  unset(request: { ref: string }): Promise<{ result: { ok: boolean } }>
+}
+
+/** The connection service face exposing the API client. */
+interface ConnectionLike {
+  api: { credentials: CredentialsApiLike }
+}
+
+/** Credential controls the settings section injects. */
+export interface NebulaCredentialFns {
+  /** Report configured/writable state for each reference (never the value). */
+  describeCredentials: (refs: string[]) => Promise<Array<{ ref: string; configured: boolean; writable: boolean }>>
+  /** Write a credential value through the Host (persists to the credentials document). */
+  setCredential: (ref: string, value: string) => Promise<boolean>
+  /** Remove a credential value. */
+  unsetCredential: (ref: string) => Promise<boolean>
+}
+
+/** Mount the conversation node definition, the keyed Chat renderer, and the
+ *  NebulaGraph instance-profiles settings section. */
 export function apply(ctx: ClientContext): void {
+  ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'dsh-nebula: settings dictionaries')
+
   ctx.conversationEvents.register(nebulaGraphDefinition)
   ctx.slots.inject('conversation.chat.node', () => ctx.slots.register({
     name: 'conversation.chat.node',
     key: 'nebula-graph',
   }, NebulaGraphView))
+
+  // Settings → NebulaGraph: one nav section managing the named instances.
+  // The host registers a `dsh-nebula` settings namespace and serves it over
+  // the plugin-owned /dsh-nebula/api route (the harness settings RPC exposes
+  // only allowlisted namespaces); the section reads/writes through that route
+  // and refreshes on forwarded document-updated events for this namespace.
+  const t = ctx.locale.bind(NS)
+  const subscribeInstances = (listener: () => void): (() => void) => {
+    const remote = ctx.get('remote') as RemoteLike | undefined
+    if (remote === undefined) return () => {}
+    return remote.$on('settings/document-updated', (ns) => {
+      if (ns === NEBULA_SETTINGS_NAMESPACE) listener()
+    })
+  }
+  // Credential values never leave the Host: describe reports only
+  // configured/writable flags, set/unset write through the harness
+  // credentials RPC (persisting to the DSH credentials document).
+  const credentialsApi = (ctx.get('connection') as ConnectionLike | undefined)?.api?.credentials
+  const credentialFns: NebulaCredentialFns = {
+    describeCredentials: async (refs) => {
+      if (credentialsApi === undefined) return []
+      try {
+        const response = await credentialsApi.describe({ refs })
+        if (!response.result.ok) return []
+        return refs.map((ref) => {
+          const view = response.result.value.credentials[ref]
+          return { ref, configured: view?.configured ?? false, writable: view?.writable ?? true }
+        })
+      } catch {
+        return []
+      }
+    },
+    setCredential: async (ref, value) => {
+      if (credentialsApi === undefined) return false
+      try {
+        const response = await credentialsApi.set({ ref, value })
+        return response.result.ok
+      } catch {
+        return false
+      }
+    },
+    unsetCredential: async (ref) => {
+      if (credentialsApi === undefined) return false
+      try {
+        const response = await credentialsApi.unset({ ref })
+        return response.result.ok
+      } catch {
+        return false
+      }
+    },
+  }
+  const subscribeCredentials = (listener: () => void): (() => void) => {
+    const remote = ctx.get('remote') as RemoteLike | undefined
+    if (remote === undefined) return () => {}
+    return remote.$on('credentials/updated', () => { listener() })
+  }
+  ctx.slots.inject('settings.section', () => ctx.slots.register({
+    name: 'settings.section',
+    id: 'nebula',
+    order: 20,
+    label: () => t('nav'),
+    locale: NS,
+    inject: () => ({
+      load: (): Promise<InstancesView> => instancesApi.get(),
+      update: (section: NebulaInstanceSettings, revision?: number) => instancesApi.update(section, revision),
+      subscribe: subscribeInstances,
+      ...credentialFns,
+      subscribeCredentials,
+    }),
+  }, NebulaInstancesSection))
 }

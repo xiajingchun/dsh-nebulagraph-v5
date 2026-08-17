@@ -11,7 +11,7 @@ import { fileURLToPath } from 'node:url'
 import * as grpc from '@grpc/grpc-js'
 import * as protoLoader from '@grpc/proto-loader'
 import type { ToolDefinition } from '@deepseek-ai/dsh-tools'
-import { apply, Config } from '../src/index.ts'
+import { apply, Config, NEBULA_SETTINGS_NAMESPACE } from '../src/index.ts'
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 
 const protoDir = join(dirname(fileURLToPath(import.meta.url)), '..', 'src', 'proto')
@@ -184,7 +184,12 @@ function nodeTable(): unknown {
   }
 }
 
-function startFakeServer(): Promise<{ port: number; close: () => Promise<void>; seenStmts: string[] }> {
+function startFakeServer(): Promise<{
+  port: number
+  close: () => Promise<void>
+  seenStmts: string[]
+  seenAuth?: { username: string; authInfo: string }
+}> {
   const packageDefinition = protoLoader.loadSync(['nebula/graph.proto', 'nebula/common.proto', 'nebula/vector.proto'], {
     includeDirs: [protoDir],
     keepCase: true,
@@ -197,9 +202,14 @@ function startFakeServer(): Promise<{ port: number; close: () => Promise<void>; 
     nebula: { proto: { graph: { GraphService: { service: grpc.ServiceDefinition } } } }
   }
   const seenStmts: string[] = []
+  let seenAuth: { username: string; authInfo: string } | undefined = undefined
   const server = new grpc.Server()
   server.addService(grpcObj.nebula.proto.graph.GraphService.service, {
-    authenticate: (call: grpc.ServerUnaryCall<unknown, unknown>, callback: grpc.sendUnaryData<unknown>) => {
+    authenticate: (call: grpc.ServerUnaryCall<{ username: Buffer; auth_info: Buffer }, unknown>, callback: grpc.sendUnaryData<unknown>) => {
+      seenAuth = {
+        username: call.request.username.toString(),
+        authInfo: call.request.auth_info.toString(),
+      }
       callback(null, { status: { code: Buffer.from('00000'), message: Buffer.from('') }, session_id: '7', version: Buffer.from('5.0.0') })
     },
     execute: (call: grpc.ServerUnaryCall<{ session_id: string; stmt: Buffer }, unknown>, callback: grpc.sendUnaryData<unknown>) => {
@@ -222,7 +232,14 @@ function startFakeServer(): Promise<{ port: number; close: () => Promise<void>; 
   return new Promise((resolve, reject) => {
     server.bindAsync('127.0.0.1:0', grpc.ServerCredentials.createInsecure(), (err, port) => {
       if (err !== null && err !== undefined) reject(err)
-      else resolve({ port, seenStmts, close: () => new Promise<void>((res) => server.tryShutdown(() => res())) })
+      else resolve({
+        port,
+        seenStmts,
+        // Getter: the authenticate call lands after bind, so a plain value
+        // captured here would be stale.
+        get seenAuth() { return seenAuth },
+        close: () => new Promise<void>((res) => server.tryShutdown(() => res())),
+      })
     })
   })
 }
@@ -233,7 +250,32 @@ function stubContext(options?: { credentials?: Record<string, string> }) {
   const sections: { name: string; order: number; text: string }[] = []
   const disposers: (() => void)[] = []
   const credentialsStore = options?.credentials ?? {}
+  // Minimal settings provider: installSettingsSection registers the
+  // namespace here; tests mutate the stored section and the registered scope
+  // re-resolves it through the real schema.
+  const settingsSections = new Map<string, { base: unknown; section: unknown; schema: (v: unknown) => unknown }>()
+  const settings = {
+    register: (ns: string, schema: (v: unknown) => unknown, registerOptions?: { base?: unknown }): unknown => {
+      settingsSections.set(ns, { base: registerOptions?.base, section: {}, schema })
+      return {
+        get: (): unknown => {
+          const entry = settingsSections.get(ns)!
+          const merged = { ...(entry.base as object), ...(entry.section as object) }
+          return entry.schema(merged)
+        },
+        watch: (): (() => void) => () => {},
+      }
+    },
+  }
+  const setSettingsSection = (ns: string, section: unknown): void => {
+    const entry = settingsSections.get(ns)
+    if (entry === undefined) throw new Error(`no registered settings namespace ${ns}`)
+    entry.section = section
+  }
   const ctx = {
+    // installSettingsSection's disposer checks whether the consumer fiber is
+    // unloading; a live (non-unloading) stub fiber state keeps the fallback path.
+    fiber: { state: 0 },
     tools: {
       register: (tool: ToolDefinition): void => {
         registered.set(tool.name, tool)
@@ -258,13 +300,34 @@ function stubContext(options?: { credentials?: Record<string, string> }) {
       }
       return undefined
     },
+    inject: (deps: readonly string[], callback: (sctx: never) => unknown): (() => void) => {
+      // Emulate cordis: the callback runs only once every requested service
+      // is available (the plugin's webServer/loader route inject simply never
+      // runs in tests that stub neither).
+      const available = new Set(['settings'])
+      if (!deps.every((dep) => available.has(dep))) return () => {}
+      const sctx = {
+        settings,
+        get: <T,>(key: string): T | undefined => {
+          if (key === 'settings') return settings as T
+          return undefined
+        },
+        effect: (entry: () => unknown): (() => void) => {
+          const result = entry()
+          if (typeof result === 'function') disposers.push(result as () => void)
+          return () => {}
+        },
+      }
+      callback(sctx as never)
+      return () => {}
+    },
     effect: (cb: () => () => void): (() => void) => {
       const disposer = cb()
       disposers.push(disposer)
       return () => {}
     },
   }
-  return { ctx, registered, sections, disposers }
+  return { ctx, registered, sections, disposers, settingsSections, setSettingsSection }
 }
 
 function runExec(tool: ToolDefinition, args: unknown): Promise<unknown> {
@@ -508,5 +571,137 @@ describe('dsh-nebula plugin', () => {
     } finally {
       await fakeServer.close()
     }
+  })
+
+  it('registers the dsh-nebula settings namespace when a settings provider exists', () => {
+    const { ctx, settingsSections } = stubContext()
+    apply(ctx as never, Config({}))
+    assert.ok(settingsSections.has(NEBULA_SETTINGS_NAMESPACE), 'namespace must be registered')
+  })
+
+  it('connects to a configured instance by alias (host/port/user/passwordRef/tls from the profile)', async () => {
+    const fakeServer = await startFakeServer()
+    try {
+      const { ctx, registered, setSettingsSection } = stubContext({ credentials: { INSTANCE_PW: 'secret' } })
+      apply(ctx as never, Config({}))
+      // The profile points at the fake server with its own credentials.
+      setSettingsSection(NEBULA_SETTINGS_NAMESPACE, {
+        instances: [{
+          alias: 'dev',
+          host: '127.0.0.1',
+          port: fakeServer.port,
+          user: 'root',
+          passwordRef: 'INSTANCE_PW',
+          tls: 'auto',
+        }],
+      })
+
+      const connectTool = registered.get('nebula_connect')!
+      // The model-facing schema exposes the alias argument.
+      const params = (connectTool.parameters as Record<string, unknown>).properties as Record<string, unknown>
+      assert.ok('instance' in params, 'nebula_connect takes an instance alias argument')
+
+      const connected = (await runExec(connectTool, { instance: 'dev' })) as {
+        connectionId: string
+        instance?: string
+        viaDefault?: boolean
+        host: string
+        port: number
+        user: string
+        serverVersion: string
+        tlsFallback?: boolean
+      }
+      assert.equal(connected.instance, 'dev')
+      assert.equal(connected.viaDefault, undefined)
+      assert.equal(connected.host, '127.0.0.1')
+      assert.equal(connected.port, fakeServer.port)
+      assert.equal(connected.user, 'root')
+      assert.equal(connected.serverVersion, '5.0.0')
+      assert.equal(connected.tlsFallback, true)
+      // The profile's passwordRef resolved through the credentials seam.
+      assert.equal(fakeServer.seenAuth?.username, 'root')
+    } finally {
+      await fakeServer.close()
+    }
+  })
+
+  it('rejects an unknown instance alias and lists the configured aliases', async () => {
+    const { ctx, registered, setSettingsSection } = stubContext()
+    apply(ctx as never, Config({}))
+    setSettingsSection(NEBULA_SETTINGS_NAMESPACE, {
+      instances: [{ alias: 'dev', host: '127.0.0.1' }, { alias: 'prod', host: '10.0.0.1' }],
+    })
+    const connectTool = registered.get('nebula_connect')!
+    await assert.rejects(
+      () => runExec(connectTool, { instance: 'staging' }),
+      /unknown NebulaGraph instance alias "staging"; configured aliases: dev, prod/,
+    )
+  })
+
+  it('uses the default instance when no alias is given (viaDefault), and warns on a stale default', async () => {
+    const fakeServer = await startFakeServer()
+    try {
+      const { ctx, registered, setSettingsSection } = stubContext({ credentials: { INSTANCE_PW: 'secret' } })
+      apply(ctx as never, Config({ host: '192.168.8.187', port: 39669, user: 'root' }))
+      setSettingsSection(NEBULA_SETTINGS_NAMESPACE, {
+        instances: [{ alias: 'dev', host: '127.0.0.1', port: fakeServer.port, passwordRef: 'INSTANCE_PW' }],
+        defaultInstance: 'dev',
+      })
+
+      const connectTool = registered.get('nebula_connect')!
+      const connected = (await runExec(connectTool, {})) as {
+        instance?: string
+        viaDefault?: boolean
+        host: string
+        port: number
+        serverVersion: string
+        tlsFallback?: boolean
+      }
+      assert.equal(connected.instance, 'dev')
+      assert.equal(connected.viaDefault, true)
+      assert.equal(connected.host, '127.0.0.1')
+      assert.equal(connected.port, fakeServer.port)
+      assert.equal(connected.serverVersion, '5.0.0')
+
+      // A stale default (deleted instance) degrades to plugin-config
+      // defaults instead of failing, and the caller is told.
+      setSettingsSection(NEBULA_SETTINGS_NAMESPACE, {
+        instances: [],
+        defaultInstance: 'gone',
+      })
+      const fallback = (await runExec(connectTool, { host: '127.0.0.1', port: fakeServer.port, user: 'root' })) as {
+        instance?: string
+        warning?: string
+        host: string
+        port: number
+        serverVersion: string
+        tlsFallback?: boolean
+      }
+      assert.equal(fallback.instance, undefined)
+      assert.match(fallback.warning ?? '', /default instance "gone" is not in the instance list/)
+      assert.equal(fallback.host, '127.0.0.1')
+      assert.equal(fallback.port, fakeServer.port)
+      assert.equal(fallback.serverVersion, '5.0.0')
+    } finally {
+      await fakeServer.close()
+    }
+  })
+
+  it('enforces a non-auto tls policy from the instance profile', async () => {
+    const { ctx, registered, setSettingsSection } = stubContext()
+    apply(ctx as never, Config({}))
+    setSettingsSection(NEBULA_SETTINGS_NAMESPACE, {
+      instances: [{ alias: 'locked', host: '10.0.0.1', tls: 'on' }],
+    })
+    const connectTool = registered.get('nebula_connect')!
+    await assert.rejects(
+      () => runExec(connectTool, { instance: 'locked', tls: 'auto' }),
+      /tls is enforced as "on" by instance "locked" and cannot be overridden to "auto"/,
+    )
+    // A matching override still passes argument validation (fails on network).
+    await assert.rejects(
+      () => runExec(connectTool, { instance: 'locked', tls: 'on', timeoutMs: 500 }),
+      (err: unknown) => !/cannot be overridden/.test((err as Error).message),
+    )
   })
 })
