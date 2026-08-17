@@ -18,6 +18,12 @@ export interface ConnectionEntry {
   options: NebulaConnectOptions
   /** When the entry was created. */
   createdAt: number
+  /**
+   * The session's working graph, tracked from `SESSION SET graph <name>`
+   * statements run through `nebula_execute`. Lets `nebula_schema` (and the
+   * model's follow-up queries) target the graph the session is already on.
+   */
+  currentGraph?: string
 }
 
 /** Tracks live connections; disposing the plugin closes every session. */

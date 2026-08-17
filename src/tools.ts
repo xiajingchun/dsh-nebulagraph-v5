@@ -14,6 +14,7 @@ import { formatValue, renderTable } from './format.ts'
 import { extractGraphData } from './graphData.ts'
 import type { GraphProjection } from './graphData.ts'
 import type { ConnectionRegistry } from './registry.ts'
+import { buildSchemaGraphMeta, collectGraphSchema, formatSchemaOverview, sessionSetGraph } from './schema.ts'
 
 /** Defaults used when a tool argument is omitted. */
 export interface NebulaToolDefaults {
@@ -209,6 +210,12 @@ export function applyNebulaTools(
       }
       if (args.gql.trim().length === 0) throw new Error('gql must be a non-empty statement')
       const result = await entry.client.execute(args.gql, exec.signal)
+      // Track the session's working graph so `nebula_schema` (and the model's
+      // follow-up queries) know which graph the session is on.
+      if (result.ok) {
+        const graph = sessionSetGraph(args.gql)
+        if (graph !== undefined) entry.currentGraph = graph
+      }
       // Decoded cells are JSON-safe by construction (see the decode package).
       return { ...result, rows: result.rows as JsonValue[][] }
     },
@@ -237,6 +244,85 @@ export function applyNebulaTools(
         return { connectionId: args.connectionId, closed: false }
       }
       return { connectionId: args.connectionId, closed: true }
+    },
+  }))
+
+  const graphInfoSchema = {
+    type: 'object',
+    additionalProperties: false,
+    properties: {
+      name: { type: 'string', required: true },
+      graphType: { type: 'string', required: true },
+      schema: { type: 'string', required: true },
+      owner: { type: 'string', required: true },
+      extra: { type: 'string', required: true },
+    },
+  } as const
+  const nodeTypeSchema = {
+    type: 'object',
+    additionalProperties: false,
+    properties: {
+      name: { type: 'string', required: true },
+      pattern: { type: 'string', required: true },
+      labels: { type: 'array', items: { type: 'string' }, required: true },
+      primaryKey: { type: 'array', items: { type: 'string' }, required: true },
+      properties: { type: 'array', items: { type: 'string' }, required: true },
+    },
+  } as const
+  const edgeTypeSchema = {
+    type: 'object',
+    additionalProperties: false,
+    properties: {
+      name: { type: 'string', required: true },
+      pattern: { type: 'string', required: true },
+      source: { type: 'string', required: true },
+      target: { type: 'string', required: true },
+      labels: { type: 'array', items: { type: 'string' }, required: true },
+      multiedgeKey: { type: 'array', items: { type: 'string' }, required: true },
+      properties: { type: 'array', items: { type: 'string' }, required: true },
+    },
+  } as const
+
+  ctx.tools.register(defineTool({
+    name: 'nebula_schema',
+    description: 'Introspect the schema of a NebulaGraph v5 graph: runs SHOW GRAPHS, resolves the target graph (explicit graph= argument, or the session working graph from SESSION SET graph, or the sole graph), then DESC GRAPH TYPE <graph_type> and returns the graph type\'s node types and edge types (labels, primary/multiedge keys, properties). Read-only: the session working graph is never changed. The Web Client renders the result as an interactive G6 schema graph — do not re-render the schema as additional charts or diagrams (e.g. dsh-ui) in your reply; summarize in text (and plain tables when useful) only.',
+    parameters: {
+      connectionId: { type: 'string', required: true, description: 'The connection id returned by nebula_connect.' },
+      graph: { type: 'string', description: 'Target graph name. Omit to use the session working graph (SESSION SET graph) or the sole graph.' },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          ok: { type: 'boolean', required: true },
+          graphs: { type: 'array', items: graphInfoSchema, required: true },
+          graph: graphInfoSchema,
+          nodes: { type: 'array', items: nodeTypeSchema, required: true },
+          edges: { type: 'array', items: edgeTypeSchema, required: true },
+          numNodes: { type: 'number', required: true },
+          numEdges: { type: 'number', required: true },
+        },
+      },
+      render: (_args, value) => [{ type: 'text', text: formatSchemaOverview(value as never) }],
+      // Replayable schema-graph projection: the Web Client draws the graph
+      // type as a meta-graph (node types as vertices, edge types as arcs).
+      presentationMeta: (_args, value) => {
+        const projection = buildSchemaGraphMeta(value as never)
+        return { graph: projection } as unknown as JsonValue
+      },
+    },
+    async execute(args, exec) {
+      const entry = registry.get(args.connectionId)
+      if (entry === undefined) {
+        throw new Error(`unknown connectionId ${args.connectionId}; open one with nebula_connect first`)
+      }
+      const overview = await collectGraphSchema(
+        (stmt) => entry.client.execute(stmt, exec.signal),
+        args.graph,
+        entry.currentGraph,
+      )
+      return overview
     },
   }))
 }

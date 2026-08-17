@@ -1,32 +1,51 @@
 # dsh-nebula
 
 A [DeepSeek Harness](https://github.com/deepseek-ai) plugin that connects to a
-**NebulaGraph 5.0** server and executes nGQL queries, in the spirit of the
-`ngql` console tool.
+**NebulaGraph v5** server and executes **ISO-GQL** statements, in the spirit of
+the `ngql` console.
 
-The plugin speaks the native NebulaGraph 5.0 wire protocol (gRPC +
+The plugin speaks the native NebulaGraph v5 wire protocol (gRPC +
 `nebula.proto.graph.GraphService`) with a **pure-JS client** — no native
 modules, no external gateway. Results come back as structured JSON rows plus
 an ngql-style ASCII table render.
 
+> **Syntax policy**: only NebulaGraph v5 ISO-GQL is supported — exactly what
+> the bundled `gql-query-generator` skill documents plus explicitly confirmed
+> catalog statements (`SHOW GRAPHS`, `DESC GRAPH TYPE`). Open-source
+> NebulaGraph nGQL (`USE space`, `SHOW SPACES`, `SHOW TAGS`, `DESCRIBE TAG`,
+> …) is **not** referenced. The v5 session working graph is switched with
+> `SESSION SET graph <name>`, or scoped per statement with `USE <graph> <stmt>`
+> / `USE <graph> { … }`.
+
 ## Features
 
-- Connect / authenticate against a graphd (`nebula_connect`), execute nGQL on
+- Connect / authenticate against a graphd (`nebula_connect`), execute GQL on
   the same server-side session (`nebula_execute`), and close it
   (`nebula_disconnect`).
 - Decodes the columnar `VectorResultTable` payload exactly like the official
   nebula-go v5 client: scalars, strings, temporal values, lists, sets, maps,
   records, vertices, edges, paths, embedding vectors, geography, `Any`-typed
   columns, const vectors, and null bitmaps.
+- **Schema exploration (`nebula_schema`)**: one call runs `SHOW GRAPHS`,
+  resolves the target graph (explicit `graph=` argument, the session working
+  graph from `SESSION SET graph`, or the sole graph), then `DESC GRAPH TYPE`
+  and returns the graph type's node types and edge types — labels,
+  primary/multiedge keys, and properties. Read-only: the session working graph
+  is never changed.
 - ngql-compatible value rendering (`(id@type:labels{props})`,
-- **Interactive graph rendering (Web Client)**: when a query result contains
-  nodes, edges, or paths, `nebula_execute` projects a replayable graph payload
-  into the tool-result meta and the bundled Web Client plugin renders it as an
-  interactive [AntV G6](https://g6.antv.antgroup.com/) graph (drag / zoom /
-  hover), alongside the normal table output.
+- **Interactive graph rendering (Web Client)**: when a `nebula_execute` result
+  contains nodes, edges, or paths, the result is projected into a replayable
+  graph payload and the bundled Web Client plugin renders it as an interactive
+  [AntV G6](https://g6.antv.antgroup.com/) graph (drag / zoom / hover),
+  alongside the normal table output. `nebula_schema` results render as a
+  **schema meta-graph**: node types become card vertices (name, labels,
+  🔑 primary key, properties) and edge types become arcs between their
+  pattern's source/target node types, laid out with a layered dagre layout.
   `(src)-[rank@type:labels{props}]->(dst)`, `2019-01-01T12:34:56.123456`,
   durations as `P1Y2M3DT4H5M6.123456S`, …) and an ASCII table output.
-- `USE graph` and other session-state statements persist per `connectionId`.
+- `SESSION SET graph` and other session-state statements persist per
+  `connectionId`; the plugin tracks the session's working graph so
+  `nebula_schema` can target it automatically.
 - Bundles the **`gql-query-generator`** skill: the plugin registers a
   `ctx.skills` provider so the agent's `skill` tool can load NebulaGraph
   GQL-writing guidance (reference docs ship in `gql-query-generator/references/`
@@ -40,7 +59,8 @@ an ngql-style ASCII table render.
 | Tool | Purpose |
 | --- | --- |
 | `nebula_connect` | Connect to a graphd and open a session. Arguments: `host`, `port`, `user`, `password`, `timeoutMs` (all optional, defaulting to plugin config). Returns a `connectionId`. |
-| `nebula_execute` | Run one nGQL statement on a connection. Arguments: `connectionId` (required), `gql` (required), `timeoutMs`. Returns `{ ok, columns, rows, numRows, latencyUs, summary?, error? }`. |
+| `nebula_execute` | Run one GQL statement on a connection. Arguments: `connectionId` (required), `gql` (required), `timeoutMs`. Returns `{ ok, columns, rows, numRows, latencyUs, summary?, error? }`. |
+| `nebula_schema` | Introspect a graph's schema. Arguments: `connectionId` (required), `graph` (optional — defaults to the session working graph, then the sole graph). Runs `SHOW GRAPHS` + `DESC GRAPH TYPE`, returns `{ graphs, graph, nodes, edges, … }`. Read-only. |
 | `nebula_disconnect` | Close a connection and release its server-side session. |
 
 ## Skill
@@ -59,8 +79,12 @@ Typical agent flow:
 nebula_connect (host: 192.168.8.6, port: 9669, user: root, password: …)
   → { connectionId: "…" }
 nebula_execute (connectionId, gql: "SHOW GRAPHS")
-nebula_execute (connectionId, gql: "USE `movie`")
-nebula_execute (connectionId, gql: "MATCH (v) RETURN v LIMIT 5")
+nebula_schema  (connectionId, graph: "movie")
+  → { graphs: […], graph: { name: "movie", graphType: "movie_type", … },
+      nodes: [ { name: "Actor", labels: [Person], primaryKey: [id], … } ],
+      edges: [ { name: "Act", source: "Actor", target: "Movie", … } ] }
+nebula_execute (connectionId, gql: "SESSION SET graph movie")
+nebula_execute (connectionId, gql: "MATCH (n) RETURN n LIMIT 5")
 nebula_disconnect (connectionId)
 ```
 
