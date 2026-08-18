@@ -20,6 +20,7 @@ import type {
   ConversationNodeDefinition,
 } from '@deepseek-ai/dsh-client-runtime/client'
 import type { ChatNodeViewProps } from '@deepseek-ai/dsh-client-ui-conversation/client'
+import type { Translate, TranslateNS } from '@deepseek-ai/dsh-client-ui-slots'
 // Type-only: pulls the settings slot-contract declarations (SlotMap's
 // 'settings.section' entry and the owner props) into this compilation.
 // Erased at build time — the client bundle never requires the settings
@@ -382,6 +383,7 @@ function formatTooltipValue(value: unknown): string {
 function propertyRowsHtml(
   properties: Record<string, unknown>,
   isKey: (key: string) => boolean = () => false,
+  t: Translate<NebulaLocaleKey> = (key) => key,
 ): string {
   const keys = Object.keys(properties)
   if (keys.length === 0) return '<span style="color:#7a828e">(no properties)</span>'
@@ -390,7 +392,7 @@ function propertyRowsHtml(
     return `<span style="color:#d8dee9">${keyHtml}</span>: <span style="color:#9aa4b2">${escapeHtml(formatTooltipValue(properties[key]))}</span>`
   })
   const omitted = keys.length - rows.length
-  if (omitted > 0) rows.push(`<span style="color:#7a828e">… 另有 ${omitted} 个属性未显示</span>`)
+  if (omitted > 0) rows.push(`<span style="color:#7a828e">${escapeHtml(t('moreProperties', { count: omitted }))}</span>`)
   return rows.join('<br/>')
 }
 
@@ -408,7 +410,7 @@ function primaryKeyValueFromData(d: Record<string, unknown>): string | undefined
 }
 
 /** Tooltip card for a data-graph node: primary key + all properties (truncated). */
-function dataNodeTooltip(item: { data?: Record<string, unknown> }): string {
+function dataNodeTooltip(item: { data?: Record<string, unknown> }, t: Translate<NebulaLocaleKey> = (key) => key): string {
   const d = item.data ?? {}
   const type = typeof d.type === 'string' && d.type.length > 0 ? d.type : '—'
   const labels = Array.isArray(d.labels) && d.labels.length > 0 ? d.labels.map(String).join(', ') : '—'
@@ -426,12 +428,12 @@ function dataNodeTooltip(item: { data?: Record<string, unknown> }): string {
     title,
     `<span style="color:#9aa4b2">type: ${escapeHtml(type)}<br/>labels: ${escapeHtml(labels)}</span>`,
     '<span style="color:#9aa4b2">properties:</span>',
-    propertyRowsHtml(props, (key) => pkNames.includes(key)),
+    propertyRowsHtml(props, (key) => pkNames.includes(key), t),
   ].join('<br/>')
 }
 
 /** Tooltip card for a data-graph edge: type + endpoints + all properties (truncated). */
-function dataEdgeTooltip(item: { source?: unknown; target?: unknown; data?: Record<string, unknown> }): string {
+function dataEdgeTooltip(item: { source?: unknown; target?: unknown; data?: Record<string, unknown> }, t: Translate<NebulaLocaleKey> = (key) => key): string {
   const d = item.data ?? {}
   const type = typeof d.type === 'string' && d.type.length > 0 ? d.type : '—'
   const direction = typeof d.direction === 'string' && d.direction.length > 0
@@ -452,18 +454,18 @@ function dataEdgeTooltip(item: { source?: unknown; target?: unknown; data?: Reco
     `<span style="color:#9aa4b2">${escapeHtml(String(item.source ?? ''))} → ${escapeHtml(String(item.target ?? ''))}${direction}</span>`,
     keyLine,
     '<span style="color:#9aa4b2">properties:</span>',
-    propertyRowsHtml(props, (key) => hasKey && mk.includes(key)),
+    propertyRowsHtml(props, (key) => hasKey && mk.includes(key), t),
   ].filter((line) => line.length > 0).join('<br/>')
 }
 
 /** Tooltip card for a schema node: labels, primary key, and property list. */
-function schemaNodeTooltip(node: SchemaGraphProjection['nodes'][number]): string {
+function schemaNodeTooltip(node: SchemaGraphProjection['nodes'][number], t: Translate<NebulaLocaleKey> = (key) => key): string {
   const labels = node.labels.length > 0 ? escapeHtml(node.labels.join(', ')) : '—'
   const key = node.primaryKey.length > 0 ? escapeHtml(node.primaryKey.join(', ')) : '—'
   const rows = node.properties.slice(0, TOOLTIP_MAX_PROPERTIES)
     .map((p) => `${node.primaryKey.includes(p) ? '🔑 ' : ''}${escapeHtml(p)}`)
   const omitted = node.properties.length - rows.length
-  if (omitted > 0) rows.push(`… 另有 ${omitted} 个属性未显示`)
+  if (omitted > 0) rows.push(`… ${escapeHtml(t('moreProperties', { count: omitted }))}`)
   return [
     `<b>${escapeHtml(node.name)}</b>`,
     `<span style="color:#9aa4b2">labels: ${labels}<br/>primary key: ${key}</span>`,
@@ -473,13 +475,13 @@ function schemaNodeTooltip(node: SchemaGraphProjection['nodes'][number]): string
 }
 
 /** Tooltip card for a schema edge: type name, multiedge key, and property list. */
-function schemaEdgeTooltip(edge: SchemaGraphProjection['edges'][number]): string {
+function schemaEdgeTooltip(edge: SchemaGraphProjection['edges'][number], t: Translate<NebulaLocaleKey> = (key) => key): string {
   const key = edge.multiedgeKey.length > 0 && edge.multiedgeKey[0] !== 'Unique' && edge.multiedgeKey[0] !== 'Auto'
     ? `key: ${escapeHtml(edge.multiedgeKey.join(', '))}`
     : 'key: —'
   const rows = edge.properties.slice(0, TOOLTIP_MAX_PROPERTIES).map((p) => escapeHtml(p))
   const omitted = edge.properties.length - rows.length
-  if (omitted > 0) rows.push(`… 另有 ${omitted} 个属性未显示`)
+  if (omitted > 0) rows.push(`… ${escapeHtml(t('moreProperties', { count: omitted }))}`)
   return [
     `<b>${escapeHtml(edge.name)}</b>`,
     `<span style="color:#9aa4b2">${key}</span>`,
@@ -547,10 +549,18 @@ function capRenderData(graph: {
 }
 
 /** Chat node renderer: an interactive G6 graph inside a fixed-height card. */
-function NebulaGraphView({ node }: { node: ChatNodeViewProps<'nebula-graph'>['node'] }): ReturnType<typeof createElement> {
+function NebulaGraphView({ node, t }: {
+  node: ChatNodeViewProps<'nebula-graph'>['node']
+  t: TranslateNS<typeof NS>
+}): ReturnType<typeof createElement> {
   const containerRef = useRef<HTMLDivElement | null>(null)
   const graphRef = useRef<Graph | null>(null)
   const [fullscreen, setFullscreen] = useState(false)
+  // The tooltip closures below are created inside the graph-mount effect
+  // (deps [graph]); the locale seat is re-derived on every locale switch, so
+  // read the latest `t` through a ref at hover time instead of capturing it.
+  const tRef = useRef(t)
+  tRef.current = t
   const graph = node.data.graph
   const schema = isSchemaGraph(graph)
   // Lite mode: beyond these sizes the d3-force simulation and per-element
@@ -615,10 +625,10 @@ function NebulaGraphView({ node }: { node: ChatNodeViewProps<'nebula-graph'>['no
               const datum = items[0] as { data?: Record<string, unknown> } | undefined
               const d = datum?.data
               if (d?.kind === 'schema-node') {
-                return schemaNodeTooltip(d as unknown as SchemaGraphProjection['nodes'][number])
+                return schemaNodeTooltip(d as unknown as SchemaGraphProjection['nodes'][number], tRef.current)
               }
               if (d?.kind === 'schema-edge') {
-                return schemaEdgeTooltip(d as unknown as SchemaGraphProjection['edges'][number])
+                return schemaEdgeTooltip(d as unknown as SchemaGraphProjection['edges'][number], tRef.current)
               }
               return ''
             },
@@ -679,9 +689,9 @@ function NebulaGraphView({ node }: { node: ChatNodeViewProps<'nebula-graph'>['no
             getContent: (_event: unknown, items: { data?: Record<string, unknown> }[]) => {
               const item = items[0] as { data?: Record<string, unknown> } | undefined
               const kind = item?.data?.kind
-              if (kind === 'data-node') return dataNodeTooltip(item as { data?: Record<string, unknown> })
+              if (kind === 'data-node') return dataNodeTooltip(item as { data?: Record<string, unknown> }, tRef.current)
               if (kind === 'data-edge') {
-                return dataEdgeTooltip(item as { source?: unknown; target?: unknown; data?: Record<string, unknown> })
+                return dataEdgeTooltip(item as { source?: unknown; target?: unknown; data?: Record<string, unknown> }, tRef.current)
               }
               return ''
             },
@@ -765,14 +775,14 @@ function NebulaGraphView({ node }: { node: ChatNodeViewProps<'nebula-graph'>['no
       createElement(
         'span',
         { style: { display: 'flex', gap: 10, alignItems: 'center' } },
-        createElement('span', null, '拖拽/滚轮缩放'),
+        createElement('span', null, t('graphDragHint')),
         createElement(
           'button',
           {
             onClick: reheat,
             style: { cursor: 'pointer', background: '#2a3140', color: '#d8dee9', border: 'none', borderRadius: 4, padding: '2px 8px', fontSize: 12 },
           },
-          '⟳ 重新布局',
+          t('graphRelayout'),
         ),
         createElement(
           'button',
@@ -780,7 +790,7 @@ function NebulaGraphView({ node }: { node: ChatNodeViewProps<'nebula-graph'>['no
             onClick: toggleFullscreen,
             style: { cursor: 'pointer', background: '#2a3140', color: '#d8dee9', border: 'none', borderRadius: 4, padding: '2px 8px', fontSize: 12 },
           },
-          fullscreen ? '退出全屏' : '⛶ 全屏',
+          fullscreen ? t('graphExitFullscreen') : t('graphFullscreen'),
         ),
       ),
     ),
@@ -794,7 +804,7 @@ function NebulaGraphView({ node }: { node: ChatNodeViewProps<'nebula-graph'>['no
               onClick: toggleFullscreen,
               style: { position: 'absolute', top: 8, right: 12, cursor: 'pointer', background: '#2a3140', color: '#d8dee9', borderRadius: 6, padding: '4px 10px', fontSize: 12, zIndex: 10000 },
             },
-            '✕ 退出全屏 (Esc)',
+            t('graphExitFullscreenEsc'),
           )
         : null,
     ),
@@ -803,10 +813,10 @@ function NebulaGraphView({ node }: { node: ChatNodeViewProps<'nebula-graph'>['no
           'div',
           { style: { padding: '4px 10px', fontSize: 12, color: '#e8a13a' } },
           graph.truncated === true && capped.furtherTruncated
-            ? '结果较大：服务端与客户端均已截断以保证流畅'
+            ? t('truncateBoth')
             : capped.furtherTruncated
-              ? '结果较大：为保持流畅，客户端已进一步截断渲染的节点/边'
-              : '结果较大，已截断部分节点/边',
+              ? t('truncateClient')
+              : t('truncateServer'),
         )
       : null,
   )
@@ -855,6 +865,7 @@ export function apply(ctx: ClientContext): void {
   ctx.slots.inject('conversation.chat.node', () => ctx.slots.register({
     name: 'conversation.chat.node',
     key: 'nebula-graph',
+    locale: NS,
   }, NebulaGraphView))
 
   // Settings → NebulaGraph: one nav section managing the named instances.

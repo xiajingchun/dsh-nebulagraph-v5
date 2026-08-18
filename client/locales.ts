@@ -1,5 +1,6 @@
 /**
- * Copy dictionaries for the NebulaGraph instance-profiles Settings section.
+ * Copy dictionaries for this plugin's client surfaces: the NebulaGraph
+ * instance-profiles Settings section and the G6 conversation graph card.
  * The Chinese dictionary is the key source of truth; English mirrors it.
  */
 
@@ -70,6 +71,16 @@ export const zh = {
   refInvalid: '凭据引用必须是字母开头的标识符（字母、数字、下划线）',
   refExists: '该凭据引用已存在',
   credEmpty: '暂无凭据引用。实例的 passwordRef 会自动出现在这里。',
+  // G6 conversation graph card copy.
+  graphDragHint: '拖拽/滚轮缩放',
+  graphRelayout: '⟳ 重新布局',
+  graphFullscreen: '⛶ 全屏',
+  graphExitFullscreen: '退出全屏',
+  graphExitFullscreenEsc: '✕ 退出全屏 (Esc)',
+  truncateBoth: '结果较大：服务端与客户端均已截断以保证流畅',
+  truncateClient: '结果较大：为保持流畅，客户端已进一步截断渲染的节点/边',
+  truncateServer: '结果较大，已截断部分节点/边',
+  moreProperties: '… 另有 {count} 个属性未显示',
 } satisfies Record<string, string>
 
 /** Nebula settings locale key union. */
@@ -140,4 +151,13 @@ export const en = {
   refInvalid: 'Credential references must be identifiers starting with a letter (letters, digits, underscores)',
   refExists: 'This credential reference already exists',
   credEmpty: 'No credential references yet. A passwordRef on an instance appears here automatically.',
+  graphDragHint: 'Drag / scroll to zoom',
+  graphRelayout: '⟳ Re-layout',
+  graphFullscreen: '⛶ Fullscreen',
+  graphExitFullscreen: 'Exit fullscreen',
+  graphExitFullscreenEsc: '✕ Exit fullscreen (Esc)',
+  truncateBoth: 'Large result: truncated by both the server and the client to keep things smooth',
+  truncateClient: 'Large result: the client truncated the rendered nodes/edges further for smoothness',
+  truncateServer: 'Large result: some nodes/edges were truncated',
+  moreProperties: '… {count} more properties not shown',
 } satisfies Record<NebulaLocaleKey, string>
