@@ -57,5 +57,10 @@ jobs:
       - name: Attach tarballs to release
         uses: softprops/action-gh-release@v2
         with:
+          # `dsh-nebula-*.tgz` alone would NOT match dsh-nebula.tgz (the
+          # pattern requires a `-` after "dsh-nebula"), so list the stable
+          # alias explicitly — releases/latest/download/dsh-nebula.tgz
+          # depends on it being attached.
           files: |
             dsh-nebula-*.tgz
+            dsh-nebula.tgz
