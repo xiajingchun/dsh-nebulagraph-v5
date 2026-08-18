@@ -371,7 +371,10 @@ async function resolveElementKeys(
  * @param defaults - resolved plugin-config defaults.
  * @param instanceSettings - reads the current `dsh-nebula` settings section
  *   (instance profiles by alias); falls back to an empty section when no
- *   settings provider is composed.
+ *   settings provider is composed. MUST read the live section at call time:
+ *   the settings source lands asynchronously after plugin apply (cordis
+ *   defers inject callbacks through a microtask), so a thunk holding a value
+ *   captured at registration would never see committed changes.
  * @returns the registration disposer (usually left to the effect registry).
  */
 export function applyNebulaTools(

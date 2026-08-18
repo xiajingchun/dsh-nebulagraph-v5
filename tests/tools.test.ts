@@ -318,7 +318,14 @@ function stubContext(options?: { credentials?: Record<string, string> }) {
           return () => {}
         },
       }
-      callback(sctx as never)
+      // Cordis defers inject callbacks through a microtask checkpoint (the
+      // fiber reload awaits Promise.resolve() before running plugin code), so
+      // the settings source lands AFTER the synchronous apply() returns.
+      // Emulate that timing here, or tests would miss capture-timing bugs —
+      // e.g. the tools holding the initial empty settings thunk while the
+      // real namespace source is assigned later (see the alias tests, which
+      // flush the inject before use).
+      void Promise.resolve().then(() => callback(sctx as never))
       return () => {}
     },
     effect: (cb: () => () => void): (() => void) => {
@@ -333,6 +340,17 @@ function stubContext(options?: { credentials?: Record<string, string> }) {
 function runExec(tool: ToolDefinition, args: unknown): Promise<unknown> {
   const exec = { signal: new AbortController().signal } as unknown as ToolRunContext
   return tool.execute(args, exec) as Promise<unknown>
+}
+
+/**
+ * Settle the deferred settings inject (see the stub's `inject`): the
+ * namespace registration and `setSource` hook land one microtask after
+ * apply(), so tests that read or write the settings section afterwards
+ * flush the inject first.
+ */
+async function flushInject(): Promise<void> {
+  await Promise.resolve()
+  await Promise.resolve()
 }
 
 describe('dsh-nebula plugin', () => {
@@ -573,9 +591,10 @@ describe('dsh-nebula plugin', () => {
     }
   })
 
-  it('registers the dsh-nebula settings namespace when a settings provider exists', () => {
+  it('registers the dsh-nebula settings namespace when a settings provider exists', async () => {
     const { ctx, settingsSections } = stubContext()
     apply(ctx as never, Config({}))
+    await flushInject()
     assert.ok(settingsSections.has(NEBULA_SETTINGS_NAMESPACE), 'namespace must be registered')
   })
 
@@ -584,6 +603,10 @@ describe('dsh-nebula plugin', () => {
     try {
       const { ctx, registered, setSettingsSection } = stubContext({ credentials: { INSTANCE_PW: 'secret' } })
       apply(ctx as never, Config({}))
+      // The settings source lands after apply() (cordis defers inject
+      // callbacks); the tools must pick up the committed section at call
+      // time rather than the empty fallback they saw at registration.
+      await flushInject()
       // The profile points at the fake server with its own credentials.
       setSettingsSection(NEBULA_SETTINGS_NAMESPACE, {
         instances: [{
@@ -628,6 +651,7 @@ describe('dsh-nebula plugin', () => {
   it('rejects an unknown instance alias and lists the configured aliases', async () => {
     const { ctx, registered, setSettingsSection } = stubContext()
     apply(ctx as never, Config({}))
+    await flushInject()
     setSettingsSection(NEBULA_SETTINGS_NAMESPACE, {
       instances: [{ alias: 'dev', host: '127.0.0.1' }, { alias: 'prod', host: '10.0.0.1' }],
     })
@@ -643,6 +667,7 @@ describe('dsh-nebula plugin', () => {
     try {
       const { ctx, registered, setSettingsSection } = stubContext({ credentials: { INSTANCE_PW: 'secret' } })
       apply(ctx as never, Config({ host: '192.168.8.187', port: 39669, user: 'root' }))
+      await flushInject()
       setSettingsSection(NEBULA_SETTINGS_NAMESPACE, {
         instances: [{ alias: 'dev', host: '127.0.0.1', port: fakeServer.port, passwordRef: 'INSTANCE_PW' }],
         defaultInstance: 'dev',
@@ -690,6 +715,7 @@ describe('dsh-nebula plugin', () => {
   it('enforces a non-auto tls policy from the instance profile', async () => {
     const { ctx, registered, setSettingsSection } = stubContext()
     apply(ctx as never, Config({}))
+    await flushInject()
     setSettingsSection(NEBULA_SETTINGS_NAMESPACE, {
       instances: [{ alias: 'locked', host: '10.0.0.1', tls: 'on' }],
     })

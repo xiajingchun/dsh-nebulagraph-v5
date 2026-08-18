@@ -159,6 +159,12 @@ export function apply(ctx: Context, config: Config): void {
   // settings provider exists; without one the source is an empty section and
   // the tools fall back to plugin-config defaults exactly as before.
   let instanceSettings: () => NebulaInstanceSettings = () => ({ instances: [] })
+  // installSettingsSection reassigns this binding asynchronously: cordis
+  // defers inject callbacks through a microtask checkpoint (the fiber reload
+  // awaits Promise.resolve() before running plugin code), so the reassignment
+  // always lands AFTER this synchronous apply() returns. Anything that needs
+  // the current section must therefore read through the binding at call time
+  // — never capture its initial value (see applyNebulaTools below).
   installSettingsSection(ctx, NEBULA_SETTINGS_NAMESPACE, NebulaInstanceSettingsSchema, { instances: [] }, {
     setSource: (source) => {
       instanceSettings = source
@@ -185,7 +191,7 @@ export function apply(ctx: Context, config: Config): void {
     ), 'dsh-nebula: instances api route')
   })
 
-  applyNebulaTools(ctx, registry, defaults, instanceSettings)
+  applyNebulaTools(ctx, registry, defaults, () => instanceSettings())
   applyGqlSkillProvider(ctx)
 
   ctx.systemPrompt.section({
