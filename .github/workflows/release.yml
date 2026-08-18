@@ -27,7 +27,7 @@ jobs:
       - name: Set up Node
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 24
           cache: pnpm
 
       # A v0.1.0 tag must pack dsh-nebula-0.1.0.tgz — fail loudly on drift.
