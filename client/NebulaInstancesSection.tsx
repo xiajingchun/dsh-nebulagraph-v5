@@ -10,6 +10,11 @@
  *
  * Copy follows the active locale through the framework `t` seat (dictionary
  * namespace `settings.nebula`, see ./locales.ts).
+ *
+ * Styling resolves every color through the platform `--dsw-*` theme tokens
+ * (the sheets the ui-theme composition ships), so the section follows the
+ * DSH Appearance setting — the same vocabulary the first-party settings
+ * sections use. No literal light/dark palettes are hardcoded here.
  */
 
 import { useEffect, useState, type ReactNode } from 'react'
@@ -72,7 +77,7 @@ function Field(props: {
 }): ReactNode {
   return (
     <label style={{ display: 'flex', flexDirection: 'column', gap: 4, flex: props.wide === true ? '1 1 100%' : '1 1 0', minWidth: props.wide === true ? 0 : 150 }}>
-      <span style={{ fontSize: 12, color: '#9aa4b2' }}>
+      <span style={{ fontSize: 12, color: 'var(--dsw-alias-label-secondary)' }}>
         {props.label}{props.required === true ? ' *' : ''}
       </span>
       <input
@@ -83,11 +88,11 @@ function Field(props: {
         autoComplete="off"
         onChange={(event) => { props.onChange(event.currentTarget.value) }}
         style={{
-          background: '#12151c',
-          border: '1px solid #2a3140',
+          background: 'var(--dsw-alias-bg-layer-1)',
+          border: '1px solid var(--dsw-alias-border-l2)',
           borderRadius: 6,
           padding: '6px 8px',
-          color: '#d8dee9',
+          color: 'var(--dsw-alias-label-primary)',
           fontSize: 13,
           fontFamily: 'inherit',
           outline: 'none',
@@ -118,25 +123,25 @@ function InstanceCard(props: {
   ].join('')
   return (
     <div style={{
-      border: `1px solid ${isDefault ? '#5B8FF9' : '#2a3140'}`,
+      border: `1px solid ${isDefault ? 'var(--dsw-alias-state-business-primary)' : 'var(--dsw-alias-border-l2)'}`,
       borderRadius: 8,
       padding: '10px 12px',
-      background: '#1b212c',
+      background: 'var(--dsw-alias-bg-module-platform)',
       display: 'flex',
       flexDirection: 'column',
       gap: 6,
     }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
-        <span style={{ fontWeight: 600, color: '#d8dee9', fontSize: 14 }}>
+        <span style={{ fontWeight: 600, color: 'var(--dsw-alias-label-primary)', fontSize: 14 }}>
           {isDefault ? '⭐ ' : ''}{instance.alias}
         </span>
         {isDefault
-          ? <span style={{ fontSize: 11, color: '#5B8FF9', border: '1px solid #5B8FF9', borderRadius: 4, padding: '1px 6px' }}>{t('defaultBadge')}</span>
+          ? <span style={{ fontSize: 11, color: 'var(--dsw-alias-state-business-primary)', border: '1px solid var(--dsw-alias-state-business-primary)', borderRadius: 4, padding: '1px 6px' }}>{t('defaultBadge')}</span>
           : null}
-        <span style={{ fontSize: 12, color: '#9aa4b2' }}>{summary}</span>
+        <span style={{ fontSize: 12, color: 'var(--dsw-alias-label-tertiary)' }}>{summary}</span>
       </div>
       {instance.note !== undefined && instance.note !== ''
-        ? <span style={{ fontSize: 12, color: '#9aa4b2' }}>{instance.note}</span>
+        ? <span style={{ fontSize: 12, color: 'var(--dsw-alias-label-tertiary)' }}>{instance.note}</span>
         : null}
       <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
         {!isDefault
@@ -172,8 +177,8 @@ function CardButton(props: {
       style={{
         cursor: props.disabled === true ? 'not-allowed' : 'pointer',
         background: 'transparent',
-        color: danger ? '#E8684A' : '#8ab4ff',
-        border: `1px solid ${danger ? '#E8684A' : '#3a4a63'}`,
+        color: danger ? 'var(--dsw-alias-state-error-primary)' : 'var(--dsw-alias-label-primary)',
+        border: `1px solid ${danger ? 'var(--dsw-alias-state-error-primary)' : 'var(--dsw-alias-border-l2)'}`,
         borderRadius: 6,
         padding: '3px 10px',
         fontSize: 12,
@@ -202,12 +207,12 @@ function CredentialRow(props: {
   const { reference: ref, configured, writable, removable, draft, busy, t } = props
   return (
     <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
-      <code style={{ color: '#d8dee9', background: '#12151c', borderRadius: 4, padding: '3px 6px', fontSize: 12 }}>{ref}</code>
+      <code style={{ color: 'var(--dsw-alias-label-primary)', background: 'var(--dsw-alias-bg-layer-1)', borderRadius: 4, padding: '3px 6px', fontSize: 12 }}>{ref}</code>
       <span
         style={{
           fontSize: 11,
-          color: configured ? '#5AD8A6' : '#F6BD16',
-          border: `1px solid ${configured ? '#5AD8A6' : '#F6BD16'}`,
+          color: configured ? 'var(--dsw-alias-state-success-primary)' : 'var(--dsw-alias-state-warn-primary)',
+          border: `1px solid ${configured ? 'var(--dsw-alias-state-success-primary)' : 'var(--dsw-alias-state-warn-primary)'}`,
           borderRadius: 4,
           padding: '1px 6px',
         }}
@@ -224,11 +229,11 @@ function CredentialRow(props: {
         onChange={(event) => { props.onDraftChange(event.currentTarget.value) }}
         style={{
           flex: '1 1 220px',
-          background: '#12151c',
-          border: '1px solid #2a3140',
+          background: 'var(--dsw-alias-bg-layer-1)',
+          border: '1px solid var(--dsw-alias-border-l2)',
           borderRadius: 6,
           padding: '5px 8px',
-          color: '#d8dee9',
+          color: 'var(--dsw-alias-label-primary)',
           fontSize: 12,
           outline: 'none',
         }}
@@ -357,13 +362,13 @@ function CredentialsPanel(props: {
   }
 
   return (
-    <div style={{ border: '1px solid #2a3140', borderRadius: 8, padding: 12, background: '#1b212c', display: 'flex', flexDirection: 'column', gap: 10 }}>
+    <div style={{ border: '1px solid var(--dsw-alias-border-l2)', borderRadius: 8, padding: 12, background: 'var(--dsw-alias-bg-module-platform)', display: 'flex', flexDirection: 'column', gap: 10 }}>
       <div>
-        <span style={{ fontWeight: 600, color: '#d8dee9', fontSize: 14 }}>{t('credentialsTitle')}</span>
-        <p style={{ margin: '4px 0 0', fontSize: 12, color: '#9aa4b2', lineHeight: 1.5 }}>{t('credentialsHint')}</p>
+        <span style={{ fontWeight: 600, color: 'var(--dsw-alias-label-primary)', fontSize: 14 }}>{t('credentialsTitle')}</span>
+        <p style={{ margin: '4px 0 0', fontSize: 12, color: 'var(--dsw-alias-label-tertiary)', lineHeight: 1.5 }}>{t('credentialsHint')}</p>
       </div>
       {refs.length === 0 ? (
-        <p style={{ margin: 0, fontSize: 12, color: '#9aa4b2' }}>{t('credEmpty')}</p>
+        <p style={{ margin: 0, fontSize: 12, color: 'var(--dsw-alias-label-tertiary)' }}>{t('credEmpty')}</p>
       ) : (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
           {refs.map((ref) => {
@@ -402,11 +407,11 @@ function CredentialsPanel(props: {
               }}
               style={{
                 flex: '1 1 220px',
-                background: '#12151c',
-                border: '1px solid #2a3140',
+                background: 'var(--dsw-alias-bg-layer-1)',
+                border: '1px solid var(--dsw-alias-border-l2)',
                 borderRadius: 6,
                 padding: '5px 8px',
-                color: '#d8dee9',
+                color: 'var(--dsw-alias-label-primary)',
                 fontSize: 12,
                 outline: 'none',
               }}
@@ -417,8 +422,8 @@ function CredentialsPanel(props: {
               onClick={() => { void addExtra() }}
               style={{
                 cursor: !writable || newRef.trim() === '' ? 'not-allowed' : 'pointer',
-                background: '#5B8FF9',
-                color: '#0b0e14',
+                background: 'var(--dsw-alias-button-primary-fill)',
+                color: 'var(--dsw-alias-label-primary-foreground)',
                 border: 'none',
                 borderRadius: 6,
                 padding: '5px 12px',
@@ -441,8 +446,8 @@ function CredentialsPanel(props: {
                 style={{
                   cursor: 'pointer',
                   background: 'transparent',
-                  color: '#8ab4ff',
-                  border: '1px dashed #3a4a63',
+                  color: 'var(--dsw-alias-label-primary)',
+                  border: '1px dashed var(--dsw-alias-border-l3)',
                   borderRadius: 6,
                   padding: '5px 12px',
                   fontSize: 12,
@@ -454,7 +459,7 @@ function CredentialsPanel(props: {
           )
           : null}
       {error !== undefined
-        ? <p role="alert" style={{ margin: 0, fontSize: 12, color: '#E8684A' }}>{error}</p>
+        ? <p role="alert" style={{ margin: 0, fontSize: 12, color: 'var(--dsw-alias-state-error-primary)' }}>{error}</p>
         : null}
     </div>
   )
@@ -493,15 +498,15 @@ export function NebulaInstancesSection(props: NebulaInstancesSectionProps): Reac
   }, [load, subscribe])
 
   if (state.status === 'loading') {
-    return <p style={{ color: '#9aa4b2', fontSize: 13 }}>{t('loading')}</p>
+    return <p style={{ color: 'var(--dsw-alias-label-tertiary)', fontSize: 13 }}>{t('loading')}</p>
   }
   if (state.status === 'error') {
     return (
       <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-        <p role="alert" style={{ margin: 0, fontSize: 13, color: '#E8684A' }}>
+        <p role="alert" style={{ margin: 0, fontSize: 13, color: 'var(--dsw-alias-state-error-primary)' }}>
           {t('errorTitle', { message: state.message })}
         </p>
-        <p style={{ margin: 0, fontSize: 12, color: '#9aa4b2' }}>
+        <p style={{ margin: 0, fontSize: 12, color: 'var(--dsw-alias-label-tertiary)' }}>
           {t('errorHint')}
         </p>
       </div>
@@ -640,23 +645,23 @@ export function NebulaInstancesSection(props: NebulaInstancesSectionProps): Reac
   }
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 14, maxWidth: 720 }}>
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 14, maxWidth: 720, color: 'var(--dsw-alias-label-primary)' }}>
       <div>
-        <p style={{ margin: 0, fontSize: 13, color: '#9aa4b2', lineHeight: 1.6 }}>
+        <p style={{ margin: 0, fontSize: 13, color: 'var(--dsw-alias-label-tertiary)', lineHeight: 1.6 }}>
           {t('description1')}
-          <code style={{ color: '#8ab4ff', background: '#12151c', borderRadius: 4, padding: '1px 5px' }}>nebula_connect(instance: "prod")</code>
+          <code style={{ color: 'var(--dsw-alias-label-primary)', background: 'var(--dsw-alias-markdown-inline-code)', borderRadius: 4, padding: '1px 5px' }}>nebula_connect(instance: "prod")</code>
           {t('description2')}
         </p>
       </div>
 
       {!writable ? (
-        <p style={{ margin: 0, fontSize: 12, color: '#F6BD16' }} role="status">
+        <p style={{ margin: 0, fontSize: 12, color: 'var(--dsw-alias-state-warn-primary)' }} role="status">
           {t('readOnly')}
         </p>
       ) : null}
 
       {instances.length === 0 && !editing ? (
-        <p style={{ margin: 0, fontSize: 13, color: '#9aa4b2' }}>
+        <p style={{ margin: 0, fontSize: 13, color: 'var(--dsw-alias-label-tertiary)' }}>
           {t('empty')}
         </p>
       ) : null}
@@ -679,15 +684,15 @@ export function NebulaInstancesSection(props: NebulaInstancesSectionProps): Reac
 
       {editor.kind === 'new' || editor.kind === 'edit' ? (
         <div style={{
-          border: '1px solid #5B8FF9',
+          border: '1px solid var(--dsw-alias-state-business-primary)',
           borderRadius: 8,
           padding: 12,
-          background: '#161c26',
+          background: 'var(--dsw-alias-bg-module-platform)',
           display: 'flex',
           flexDirection: 'column',
           gap: 10,
         }}>
-          <span style={{ fontWeight: 600, color: '#d8dee9', fontSize: 14 }}>
+          <span style={{ fontWeight: 600, color: 'var(--dsw-alias-label-primary)', fontSize: 14 }}>
             {editor.kind === 'new'
               ? t('addTitle')
               : t('editTitle', { alias: editor.alias })}
@@ -703,11 +708,11 @@ export function NebulaInstancesSection(props: NebulaInstancesSectionProps): Reac
           </div>
           <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'flex-end' }}>
             <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-              <span style={{ fontSize: 12, color: '#9aa4b2' }}>{t('fieldTls')}</span>
+              <span style={{ fontSize: 12, color: 'var(--dsw-alias-label-secondary)' }}>{t('fieldTls')}</span>
               <select
                 value={draft.tls}
                 onChange={(event) => { setDraftField('tls')(event.currentTarget.value) }}
-                style={{ background: '#12151c', border: '1px solid #2a3140', borderRadius: 6, padding: '6px 8px', color: '#d8dee9', fontSize: 13, outline: 'none' }}
+                style={{ background: 'var(--dsw-alias-bg-layer-1)', border: '1px solid var(--dsw-alias-border-l2)', borderRadius: 6, padding: '6px 8px', color: 'var(--dsw-alias-label-primary)', fontSize: 13, outline: 'none' }}
               >
                 <option value="auto">{TLS_LABELS.auto}</option>
                 <option value="on">{TLS_LABELS.on}</option>
@@ -717,8 +722,8 @@ export function NebulaInstancesSection(props: NebulaInstancesSectionProps): Reac
             <Field label={t('fieldTimeoutMs')} value={draft.timeoutMs} onChange={setDraftField('timeoutMs')} placeholder={t('timeoutPlaceholder')} />
             <Field label={t('fieldNote')} wide value={draft.note} onChange={setDraftField('note')} placeholder={t('notePlaceholder')} />
           </div>
-          <details style={{ fontSize: 13, color: '#9aa4b2' }}>
-            <summary style={{ cursor: 'pointer', color: '#8ab4ff' }}>{t('advancedTls')}</summary>
+          <details style={{ fontSize: 13, color: 'var(--dsw-alias-label-tertiary)' }}>
+            <summary style={{ cursor: 'pointer', color: 'var(--dsw-alias-label-secondary)' }}>{t('advancedTls')}</summary>
             <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', marginTop: 8 }}>
               <Field label={t('fieldCa')} wide value={draft.ca} onChange={setDraftField('ca')} placeholder={t('caPlaceholder')} />
               <Field label={t('fieldCert')} wide value={draft.cert} onChange={setDraftField('cert')} placeholder={t('caPlaceholder')} />
@@ -727,7 +732,7 @@ export function NebulaInstancesSection(props: NebulaInstancesSectionProps): Reac
             </div>
           </details>
           {draftError !== undefined
-            ? <p role="alert" style={{ margin: 0, fontSize: 12, color: '#E8684A' }}>{draftError}</p>
+            ? <p role="alert" style={{ margin: 0, fontSize: 12, color: 'var(--dsw-alias-state-error-primary)' }}>{draftError}</p>
             : null}
           <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
             <button
@@ -736,8 +741,8 @@ export function NebulaInstancesSection(props: NebulaInstancesSectionProps): Reac
               onClick={() => { void saveDraft() }}
               style={{
                 cursor: saving || !writable ? 'not-allowed' : 'pointer',
-                background: '#5B8FF9',
-                color: '#0b0e14',
+                background: 'var(--dsw-alias-button-primary-fill)',
+                color: 'var(--dsw-alias-label-primary-foreground)',
                 border: 'none',
                 borderRadius: 6,
                 padding: '6px 16px',
@@ -761,8 +766,8 @@ export function NebulaInstancesSection(props: NebulaInstancesSectionProps): Reac
             style={{
               cursor: 'pointer',
               background: 'transparent',
-              color: '#8ab4ff',
-              border: '1px dashed #3a4a63',
+              color: 'var(--dsw-alias-label-primary)',
+              border: '1px dashed var(--dsw-alias-border-l3)',
               borderRadius: 8,
               padding: '8px 14px',
               fontSize: 13,
