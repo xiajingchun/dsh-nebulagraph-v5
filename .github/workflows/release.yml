@@ -1,0 +1,60 @@
+name: release
+
+# Build, test, and pack dsh-nebula on every `v*` tag push, then attach the
+# tarball to the tag's GitHub Release:
+#   - dsh-nebula-<version>.tgz   versioned, reproducible
+#   - dsh-nebula.tgz             stable alias, so the "latest release"
+#                                download URL never changes for users
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Uses the `packageManager` field (pnpm@11.7.0) in package.json.
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      # A v0.1.0 tag must pack dsh-nebula-0.1.0.tgz — fail loudly on drift.
+      - name: Verify tag matches package version
+        run: |
+          version="$(node -p "require('./package.json').version")"
+          if [ "v${version}" != "${GITHUB_REF_NAME}" ]; then
+            echo "::error::tag ${GITHUB_REF_NAME} does not match package.json version v${version}"
+            exit 1
+          fi
+
+      # `prepare` (pnpm build) runs as part of the install, so lib/ is fresh.
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Run tests
+        run: pnpm test
+
+      - name: Pack
+        run: |
+          pnpm pack
+          version="$(node -p "require('./package.json').version")"
+          cp "dsh-nebula-${version}.tgz" dsh-nebula.tgz
+          ls -la dsh-nebula*.tgz
+
+      - name: Attach tarballs to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dsh-nebula-*.tgz

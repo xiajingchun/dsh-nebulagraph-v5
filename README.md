@@ -9,14 +9,6 @@ The plugin speaks the native NebulaGraph v5 wire protocol (gRPC +
 modules, no external gateway. Results come back as structured JSON rows plus
 an ngql-style ASCII table render.
 
-> **Syntax policy**: only NebulaGraph v5 ISO-GQL is supported — exactly what
-> the bundled `gql-query-generator` skill documents plus explicitly confirmed
-> catalog statements (`SHOW GRAPHS`, `DESC GRAPH TYPE`). Open-source
-> NebulaGraph nGQL (`USE space`, `SHOW SPACES`, `SHOW TAGS`, `DESCRIBE TAG`,
-> …) is **not** referenced. The v5 session working graph is switched with
-> `SESSION SET graph <name>`, or scoped per statement with `USE <graph> <stmt>`
-> / `USE <graph> { … }`.
-
 ## Features
 
 - Connect / authenticate against a graphd (`nebula_connect`), execute GQL on
@@ -39,48 +31,11 @@ an ngql-style ASCII table render.
   and returns the graph type's node types and edge types — labels,
   primary/multiedge keys, and properties. Read-only: the session working graph
   is never changed.
-- ngql-compatible value rendering (`(id@type:labels{props})`,
 - **Interactive graph rendering (Web Client)**: when a `nebula_execute` result
   contains nodes, edges, or paths, the result is projected into a replayable
   graph payload and the bundled Web Client plugin renders it as an interactive
   [AntV G6](https://g6.antv.antgroup.com/) graph (drag / zoom / hover),
-  alongside the normal table output. Only the **final** graph result of each
-  turn renders: the plugin keeps one G6 card per turn whose content is the
-  latest graph-carrying tool result, so intermediate results the agent
-  produces while thinking (probe queries, exploration steps) never accumulate
-  as separate cards — the single card left behind after the turn settles is
-  the turn's last graph, placed at that result's position in the
-  conversation. Node labels always show the vertex's
-  **primary key** — the property values named by `DESC GRAPH TYPE` for the
-  node's type (the v5 columnar result carries no primary-key definition, so
-  the host resolves it lazily via `SHOW GRAPHS` + `DESC GRAPH TYPE` and
-  caches it per connection); a **composite primary key** joins its values
-  with `:`. Edge labels show the edge type name, plus the composed
-  **multiedge-key** values with their property names (e.g.
-  `serve (start_year=2002, end_year=2011)`) only when the type's
-  multiedge key defines real properties — `Unique`/`Auto` edges get no
-  suffix, and the raw rank is never shown. Hovering a node or edge opens a
-  tooltip with its full type/labels and property list (properties beyond the
-  first 10 and values longer than 80 chars are truncated to keep the card
-  compact).
-  To feed this renderer, the bundled
-  `gql-query-generator` skill defaults `RETURN` to the **complete graph
-  elements** whenever a prompt asks to return a node type or edge type (e.g.
-  "return Star Wars directors and actors") — the pattern's node and edge
-  variables (or the path variable) — and only projects a specific property
-  (e.g. `name`) when the prompt explicitly asks for it. `nebula_schema` results render as a
-  **schema meta-graph**: node types become card vertices (name, labels,
-  🔑 primary key, properties) and edge types become arcs between their
-  pattern's source/target node types, laid out with a layered dagre layout.
-  Large data graphs switch to a **lite mode** (>300 nodes or >600 edges):
-  bounded force layout, no edge labels, and lighter drag behaviors; payloads
-  above 700 nodes / 1400 edges are additionally capped client-side (with a
-  notice) so the browser stays responsive.
-  `(src)-[rank@type:labels{props}]->(dst)`, `2019-01-01T12:34:56.123456`,
-  durations as `P1Y2M3DT4H5M6.123456S`, …) and an ASCII table output.
-- `SESSION SET graph` and other session-state statements persist per
-  `connectionId`; the plugin tracks the session's working graph so
-  `nebula_schema` can target it automatically.
+  alongside the normal table output. 
 - Bundles the **`gql-query-generator`** skill: the plugin registers a
   `ctx.skills` provider so the agent's `skill` tool can load NebulaGraph
   GQL-writing guidance (reference docs ship in `gql-query-generator/references/`
@@ -140,29 +95,68 @@ nebula_disconnect (connectionId)
 The plugin is an out-of-tree DSH bundle: a plain npm package whose manifest
 declares a `dsh.bundle` patch. Any DSH installation (rc.5+; the web profile
 ships `ctx.skills`, so the bundled skill provider works out of the box) can
-install it in one command:
+install it in one command, from any of these sources (the release tarball is
+the smoothest):
 
 ```sh
-# from a registry (once published)
+# recommended — the latest release's prebuilt tarball (stable URL, always current)
+dsh plugin --profile web add https://github.com/xiajingchun/dsh-nebulagraph-v5/releases/latest/download/dsh-nebula.tgz
+
+# a specific release (versioned, reproducible)
+dsh plugin --profile web add https://github.com/xiajingchun/dsh-nebulagraph-v5/releases/download/v0.1.0/dsh-nebula-0.1.0.tgz
+
+# from the npm registry (once published)
 dsh plugin --profile web add dsh-nebula
 
-# from the packed tarball
-dsh plugin --profile web add /path/to/dsh-nebula-0.1.0.tgz
+# straight from the git repository (builds from source — see note below)
+dsh plugin --profile web add github:xiajingchun/dsh-nebulagraph-v5#v0.1.0
 
-# from a local checkout while developing
+# from a local tarball / checkout while developing
+dsh plugin --profile web add /path/to/dsh-nebula-0.1.0.tgz
 dsh plugin --profile web add link:/path/to/dsh-nebula
 ```
 
-This runs `pnpm add` in the profile directory, then appends `dsh-nebula` to
-`dsh.profile.bundles` because the package declares a `dsh.bundle` patch
-(`cordis.patch.yml` inserts the plugin row). Restart the profile
-(`dsh web`) for the new bundle to mount. `nodeLinker: hoisted` profiles must
-approve the `protobufjs` build script (the shipped web profile already does).
+The release tarballs are the `pnpm pack` output: prebuilt `lib/`, so the
+release and registry installs need no install-time build and no build-script
+approval. This runs `pnpm add` in the profile directory, then appends
+`dsh-nebula` to `dsh.profile.bundles` because the package declares a
+`dsh.bundle` patch (`cordis.patch.yml` inserts the plugin row). Restart the
+profile (`dsh web`) for the new bundle to mount.
 
-### Publishing for other users
+> **Git installs build from source.** pnpm fetches sources, not built
+> artifacts: it runs the package's `prepare` script (here `pnpm build`), which
+> needs the dev toolchain, and pnpm ≥10 refuses to run that script until it is
+> explicitly allowed — the first `add` fails and prints the package key. Copy
+> that key under `allowBuilds` in the profile's `pnpm-workspace.yaml` and
+> re-run. Prefer the release tarball or registry installs to avoid this, and
+> pin a commit (`github:…/#<sha>`) if you do install from git.
+
+`nodeLinker: hoisted` profiles must approve the `protobufjs` build script (the
+shipped web profile already does).
+
+### Releasing (for maintainers)
+
+Every **`v*` tag push** triggers the GitHub Actions workflow
+([`.github/workflows/release.yml`](.github/workflows/release.yml)): it verifies
+the tag matches `package.json`'s version, installs, runs the tests, packs, and
+uploads both the versioned `dsh-nebula-<version>.tgz` and a stable
+`dsh-nebula.tgz` alias to the release — so
+`releases/latest/download/dsh-nebula.tgz` always points at the newest build:
 
 ```sh
-cd dsh-nebula
+git tag v0.1.0 && git push origin v0.1.0
+```
+
+Manually (same result, no CI):
+
+```sh
+pnpm build && pnpm pack     # → dsh-nebula-0.1.0.tgz
+# attach the tarball to a GitHub release (optionally also as dsh-nebula.tgz)
+```
+
+For an npm release instead:
+
+```sh
 npm login        # once
 pnpm publish     # runs build + tests via prepublishOnly
 ```
@@ -221,6 +215,7 @@ from memory immediately after authentication succeeds.
 
 ## Instance profiles (Settings → NebulaGraph)
 
+![@ Settings](assets/settings.png)
 When the profile composes a settings provider (the Web GUI does), the plugin
 registers a **`dsh-nebula`** settings namespace and a **Settings →
 NebulaGraph** page. There you can:
