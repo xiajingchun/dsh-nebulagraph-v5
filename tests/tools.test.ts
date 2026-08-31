@@ -250,21 +250,35 @@ function stubContext(options?: { credentials?: Record<string, string> }) {
   const sections: { name: string; order: number; text: string }[] = []
   const disposers: (() => void)[] = []
   const credentialsStore = options?.credentials ?? {}
-  // Minimal settings provider: installSettingsSection registers the
-  // namespace here; tests mutate the stored section and the registered scope
-  // re-resolves it through the real schema.
+  // Minimal settings provider: the plugin's settings inject calls
+  // installSection here, which registers the namespace; tests mutate the
+  // stored section and the registered scope re-resolves it through the real
+  // schema.
   const settingsSections = new Map<string, { base: unknown; section: unknown; schema: (v: unknown) => unknown }>()
+  // installSection is the provider method the plugin calls now (dsh-settings
+  // ≥ 0.1.2-alpha.2 folded the old installSettingsSection free function into
+  // the provider). The stub mirrors the real one: register with the entry as
+  // base, then hand the source thunk to the plugin so later section writes
+  // re-resolve live.
   const settings = {
-    register: (ns: string, schema: (v: unknown) => unknown, registerOptions?: { base?: unknown }): unknown => {
-      settingsSections.set(ns, { base: registerOptions?.base, section: {}, schema })
-      return {
+    installSection: (
+      _owner: unknown,
+      ns: string,
+      schema: (v: unknown) => unknown,
+      entry: unknown,
+      hooks: { setSource: (source: () => unknown) => void; onChange: () => void },
+    ): void => {
+      settingsSections.set(ns, { base: entry, section: {}, schema })
+      const scope = {
         get: (): unknown => {
-          const entry = settingsSections.get(ns)!
-          const merged = { ...(entry.base as object), ...(entry.section as object) }
-          return entry.schema(merged)
+          const stored = settingsSections.get(ns)!
+          const merged = { ...(stored.base as object), ...(stored.section as object) }
+          return stored.schema(merged)
         },
         watch: (): (() => void) => () => {},
       }
+      hooks.setSource(() => scope.get())
+      hooks.onChange()
     },
   }
   const setSettingsSection = (ns: string, section: unknown): void => {
@@ -273,8 +287,8 @@ function stubContext(options?: { credentials?: Record<string, string> }) {
     entry.section = section
   }
   const ctx = {
-    // installSettingsSection's disposer checks whether the consumer fiber is
-    // unloading; a live (non-unloading) stub fiber state keeps the fallback path.
+    // A live (non-unloading) stub fiber state mirrors the real provider's
+    // installSection fallback checks.
     fiber: { state: 0 },
     tools: {
       register: (tool: ToolDefinition): void => {

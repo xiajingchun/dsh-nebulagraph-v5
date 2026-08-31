@@ -13,19 +13,27 @@
 
 import { createElement, useEffect, useRef, useState } from 'react'
 import { Graph } from '@antv/g6'
+import type { Context as ClientContext } from '@deepseek-ai/cordis'
 import type {
-  ClientContext,
   ConversationLocation,
   ConversationNodeContext,
   ConversationNodeDefinition,
-} from '@deepseek-ai/dsh-client-runtime/client'
-import type { ChatNodeViewProps } from '@deepseek-ai/dsh-client-ui-conversation/client'
+} from '@deepseek-ai/dsh-client-ui-conversation/client'
+import type { ChatNode } from '@deepseek-ai/dsh-client-ui-chat/client'
 import type { Translate, TranslateNS } from '@deepseek-ai/dsh-client-ui-slots'
+// Type-only: pulls the conversation engine's Context merges (ctx.uiConversation)
+// and the conversation view contract into this compilation.
+import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
+// Type-only: pulls ui-chat's SlotMap merge (the 'conversation.chat.node' keyed
+// entry and its owner/key props) and the public ChatNodeDataMap merge surface.
+import type {} from '@deepseek-ai/dsh-client-ui-chat/client'
 // Type-only: pulls the settings slot-contract declarations (SlotMap's
 // 'settings.section' entry and the owner props) into this compilation.
 // Erased at build time — the client bundle never requires the settings
 // package at runtime.
 import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
+// Type-only: the ctx.slots service declaration (the SlotRegistry service).
+import type {} from '@deepseek-ai/dsh-client-ui-renderer/client'
 // Type-only: the ctx.locale service declaration (the runtime service comes
 // from the composition; this module only needs the Context merge).
 import type {} from '@deepseek-ai/dsh-client-locale/client'
@@ -114,14 +122,9 @@ interface NebulaGraphChatData {
   graph: NebulaGraphPayload
 }
 
-declare module '@deepseek-ai/dsh-client-ui-conversation/client' {
+declare module '@deepseek-ai/dsh-client-ui-chat/client' {
   interface ChatNodeDataMap {
-    'nebula-graph': NebulaGraphChatData
-  }
-}
-
-declare module '@deepseek-ai/dsh-client-runtime/client' {
-  interface ConversationStepDataMap {
+    /** Latest graph-carrying tool result of the turn, for the G6 card. */
     'nebula-graph': NebulaGraphChatData
   }
 }
@@ -550,7 +553,7 @@ function capRenderData(graph: {
 
 /** Chat node renderer: an interactive G6 graph inside a fixed-height card. */
 function NebulaGraphView({ node, t }: {
-  node: ChatNodeViewProps<'nebula-graph'>['node']
+  node: ChatNode<'nebula-graph'>
   t: TranslateNS<typeof NS>
 }): ReturnType<typeof createElement> {
   const containerRef = useRef<HTMLDivElement | null>(null)
@@ -823,7 +826,7 @@ function NebulaGraphView({ node, t }: {
 }
 
 /** Client services required by this plugin. */
-export const inject = ['conversationEvents', 'slots', 'locale']
+export const inject = ['slots', 'locale', 'uiConversation']
 
 /**
  * Forwarded `settings/document-updated` event face (structural — the remote
@@ -861,7 +864,7 @@ export interface NebulaCredentialFns {
 export function apply(ctx: ClientContext): void {
   ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'dsh-nebula: settings dictionaries')
 
-  ctx.conversationEvents.register(nebulaGraphDefinition)
+  ctx.uiConversation.events.register(nebulaGraphDefinition)
   ctx.slots.inject('conversation.chat.node', () => ctx.slots.register({
     name: 'conversation.chat.node',
     key: 'nebula-graph',

@@ -12,19 +12,20 @@ const outfile = join(root, 'lib', 'client.js')
 
 mkdirSync(join(root, 'lib'), { recursive: true })
 
+// The platform module table the loader shares at boot (mirrors
+// packages/client/web/src/platform.ts in the harness): bundles resolve ONLY
+// these specifiers through the loader's require — everything else
+// (@antv/g6, and any dsh client package, none of which this client imports
+// as runtime values) is inlined.
 const EXTERNALS = [
   'react',
   'react/jsx-runtime',
   'react-dom',
   'react-dom/client',
   '@deepseek-ai/cordis',
-  '@deepseek-ai/dsh-client-runtime',
-  '@deepseek-ai/dsh-client-runtime/client',
-  '@deepseek-ai/dsh-client-ui-conversation',
-  '@deepseek-ai/dsh-client-ui-conversation/client',
+  '@deepseek-ai/dsh-client-store',
   '@deepseek-ai/dsh-client-ui-slots',
   '@deepseek-ai/dsh-client-ui-primitives',
-  '@deepseek-ai/dsh-client-web-react',
 ]
 
 const result = buildSync({

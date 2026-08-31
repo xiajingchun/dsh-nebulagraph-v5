@@ -15,7 +15,6 @@
  */
 
 import z from 'schemastery'
-import { settingsNamespace } from '@deepseek-ai/dsh-settings'
 import type { TlsMode } from './nebula-client.ts'
 
 /**
@@ -23,8 +22,12 @@ import type { TlsMode } from './nebula-client.ts'
  * settings provider is composed; the Web Client reads and writes it through
  * the plugin-owned `/dsh-nebula/api` route (the harness's own settings RPC
  * serves only namespaces on its explicit exposure allowlist).
+ *
+ * dsh-settings ≥ 0.1.2-alpha.2 dropped the `settingsNamespace()` branding
+ * helper: namespaces are now plain lowercase-kebab strings validated by the
+ * provider (`SettingsProvider.installSection`).
  */
-export const NEBULA_SETTINGS_NAMESPACE = settingsNamespace('dsh-nebula')
+export const NEBULA_SETTINGS_NAMESPACE = 'dsh-nebula'
 
 /**
  * Alias grammar: a short POSIX-ish identifier the model types in prompts and
