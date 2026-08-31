@@ -826,27 +826,38 @@ function NebulaGraphView({ node, t }: {
 }
 
 /** Client services required by this plugin. */
-export const inject = ['slots', 'locale', 'uiConversation']
+export const inject = ['slots', 'locale', 'uiConversation', 'remote', 'remote.credentials']
 
 /**
- * Forwarded `settings/document-updated` event face (structural — the remote
- * gateway provides it; absent in non-web environments the subscription is a
- * no-op, which only costs multi-tab freshness).
+ * Forwarded settings/credential event face (structural — the client Remote
+ * gateway provides it; absent in non-web environments the subscriptions are
+ * no-ops, which only costs multi-tab freshness).
  */
 interface RemoteLike {
-  $on(event: 'settings/document-updated' | 'credentials/updated', listener: (ns: string, revision: number) => void): () => void
+  $on(
+    event: 'settings/document-updated' | 'credentials/reference-updated',
+    listener: (...args: unknown[]) => void,
+  ): () => void
+  /** Generated `credentials` Remote namespace (values never return). */
+  credentials?: CredentialsRemote
 }
 
-/** The harness credentials RPC face (structural; values never return). */
-interface CredentialsApiLike {
-  describe(request: { refs: string[] }): Promise<{ result: { ok: boolean; value: { credentials: Record<string, { configured: boolean; writable: boolean }> } } }>
-  set(request: { ref: string; value: string }): Promise<{ result: { ok: boolean } }>
-  unset(request: { ref: string }): Promise<{ result: { ok: boolean } }>
+/** The harness `credentials` Remote namespace (structural; values never return). */
+interface CredentialsRemote {
+  describe(refs: string[]): Promise<CredentialsResult<Record<string, CredentialView>>>
+  set(ref: string, value: string): Promise<CredentialsResult<void>>
+  unset(ref: string): Promise<CredentialsResult<void>>
 }
 
-/** The connection service face exposing the API client. */
-interface ConnectionLike {
-  api: { credentials: CredentialsApiLike }
+/** One Remote call's outcome: the ok branch carries the value, the error branch a message. */
+type CredentialsResult<T> =
+  | { ok: true; value: T }
+  | { ok: false; error: { message: string } }
+
+/** The configured/writable facts the Host reports for one reference. */
+interface CredentialView {
+  configured: boolean
+  writable: boolean
 }
 
 /** Credential controls the settings section injects. */
@@ -886,16 +897,18 @@ export function apply(ctx: ClientContext): void {
   }
   // Credential values never leave the Host: describe reports only
   // configured/writable flags, set/unset write through the harness
-  // credentials RPC (persisting to the DSH credentials document).
-  const credentialsApi = (ctx.get('connection') as ConnectionLike | undefined)?.api?.credentials
+  // credentials Remote namespace (persisting to the DSH credentials document).
+  const credentialsRemote = (): CredentialsRemote | undefined =>
+    (ctx.get('remote') as RemoteLike | undefined)?.credentials
   const credentialFns: NebulaCredentialFns = {
     describeCredentials: async (refs) => {
-      if (credentialsApi === undefined) return []
+      const credentials = credentialsRemote()
+      if (credentials === undefined) return []
       try {
-        const response = await credentialsApi.describe({ refs })
-        if (!response.result.ok) return []
+        const response = await credentials.describe(refs)
+        if (!response.ok) return []
         return refs.map((ref) => {
-          const view = response.result.value.credentials[ref]
+          const view = response.value[ref]
           return { ref, configured: view?.configured ?? false, writable: view?.writable ?? true }
         })
       } catch {
@@ -903,19 +916,21 @@ export function apply(ctx: ClientContext): void {
       }
     },
     setCredential: async (ref, value) => {
-      if (credentialsApi === undefined) return false
+      const credentials = credentialsRemote()
+      if (credentials === undefined) return false
       try {
-        const response = await credentialsApi.set({ ref, value })
-        return response.result.ok
+        const response = await credentials.set(ref, value)
+        return response.ok
       } catch {
         return false
       }
     },
     unsetCredential: async (ref) => {
-      if (credentialsApi === undefined) return false
+      const credentials = credentialsRemote()
+      if (credentials === undefined) return false
       try {
-        const response = await credentialsApi.unset({ ref })
-        return response.result.ok
+        const response = await credentials.unset(ref)
+        return response.ok
       } catch {
         return false
       }
@@ -924,7 +939,7 @@ export function apply(ctx: ClientContext): void {
   const subscribeCredentials = (listener: () => void): (() => void) => {
     const remote = ctx.get('remote') as RemoteLike | undefined
     if (remote === undefined) return () => {}
-    return remote.$on('credentials/updated', () => { listener() })
+    return remote.$on('credentials/reference-updated', () => { listener() })
   }
   ctx.slots.inject('settings.section', () => ctx.slots.register({
     name: 'settings.section',
