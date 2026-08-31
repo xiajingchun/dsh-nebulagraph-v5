@@ -357,6 +357,15 @@ function CredentialsPanel(props: {
 
   const removeExtra = async (ref: string): Promise<void> => {
     setError(undefined)
+    // "Remove" drops the extra reference entirely, so clear its value from the
+    // credentials document first — otherwise the entry lingers in
+    // ~/.dsh/.credentials.yaml while this page no longer lists it. `unset` is
+    // idempotent, so a never-configured reference clears to a no-op.
+    const cleared = await unsetCredential(ref)
+    if (!cleared) {
+      setError(t('saveFailed'))
+      return
+    }
     const failure = await onRemoveExtra(ref)
     if (failure !== undefined) setError(failure)
   }
