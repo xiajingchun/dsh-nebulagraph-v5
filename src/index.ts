@@ -21,7 +21,10 @@
  */
 
 import type { Context } from '@deepseek-ai/cordis'
-import { installSettingsSection } from '@deepseek-ai/dsh-settings'
+// Type-only import: pulls in dsh-settings' `Context.settings` module
+// augmentation (the provider methods are reached via ctx.inject below, so no
+// runtime import is needed). Same pattern as the harness's own consumers.
+import type {} from '@deepseek-ai/dsh-settings'
 import z from 'schemastery'
 import { ConnectionRegistry } from './registry.ts'
 import { applyGqlSkillProvider } from './skill.ts'
@@ -159,20 +162,25 @@ export function apply(ctx: Context, config: Config): void {
   // settings provider exists; without one the source is an empty section and
   // the tools fall back to plugin-config defaults exactly as before.
   let instanceSettings: () => NebulaInstanceSettings = () => ({ instances: [] })
-  // installSettingsSection reassigns this binding asynchronously: cordis
-  // defers inject callbacks through a microtask checkpoint (the fiber reload
-  // awaits Promise.resolve() before running plugin code), so the reassignment
-  // always lands AFTER this synchronous apply() returns. Anything that needs
-  // the current section must therefore read through the binding at call time
-  // — never capture its initial value (see applyNebulaTools below).
-  installSettingsSection(ctx, NEBULA_SETTINGS_NAMESPACE, NebulaInstanceSettingsSchema, { instances: [] }, {
-    setSource: (source) => {
-      instanceSettings = source
-    },
-    // The tools project the section per connect call, so a committed change
-    // needs no re-registration (same pattern as the DeepSeek search provider).
-    onChange: () => {},
-    validate: validateInstanceSettings,
+  // installSection reassigns this binding asynchronously: cordis defers
+  // inject callbacks through a microtask checkpoint (the fiber reload awaits
+  // Promise.resolve() before running plugin code), so the reassignment always
+  // lands AFTER this synchronous apply() returns. Anything that needs the
+  // current section must therefore read through the binding at call time —
+  // never capture its initial value (see applyNebulaTools below). The wiring
+  // itself (installSection) lives on the settings provider since
+  // dsh-settings 0.1.2-alpha.2 replaced the old installSettingsSection free
+  // function with the provider method.
+  ctx.inject(['settings'], (settingsCtx) => {
+    settingsCtx.settings.installSection(ctx, NEBULA_SETTINGS_NAMESPACE, NebulaInstanceSettingsSchema, { instances: [] }, {
+      setSource: (source) => {
+        instanceSettings = source
+      },
+      // The tools project the section per connect call, so a committed change
+      // needs no re-registration (same pattern as the DeepSeek search provider).
+      onChange: () => {},
+      validate: validateInstanceSettings,
+    })
   })
 
   // Settings → NebulaGraph page transport: a plugin-owned webServer route

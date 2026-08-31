@@ -7,7 +7,9 @@
  */
 
 import { defineTool } from '@deepseek-ai/dsh-tools'
-import type { JsonValue } from '@deepseek-ai/dsh-tools'
+// dsh-tools ≥ 0.1.2-alpha.2 no longer re-exports JsonValue; it now lives in
+// dsh-util-values (the tools package imports it from there internally).
+import type { JsonValue } from '@deepseek-ai/dsh-util-values'
 import { NebulaClient } from './nebula-client.ts'
 import type { NebulaExecuteResult, TlsMode, TlsOptions } from './nebula-client.ts'
 import { formatValue, renderTable } from './format.ts'
