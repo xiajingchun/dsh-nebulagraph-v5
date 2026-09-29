@@ -93,10 +93,16 @@ nebula_disconnect (connectionId)
 ## Install
 
 The plugin is an out-of-tree DSH bundle: a plain npm package whose manifest
-declares a `dsh.bundle` patch. Any DSH installation (rc.5+; the web profile
-ships `ctx.skills`, so the bundled skill provider works out of the box) can
-install it in one command, from any of these sources (the release tarball is
-the smoothest):
+declares a `dsh.bundle` patch. Any DSH installation can install it in one
+command, from any of these sources (the release tarball is the smoothest):
+
+> **Runtime compatibility.** This revision targets the **dsh 0.2.0-rc.2**
+> runtime generation (all `@deepseek-ai/dsh-*` packages were unified on that
+> version, and dsh-settings 0.2.0 replaced the settings-namespace API with
+> schema-derived entry forms). The profile loader refuses to mount a bundle
+> whose `peerDependencies` do not accept the running dsh version; install an
+> older dsh-nebula revision (or its release tarball) for a pre-0.2.0 runtime
+> instead of forcing the gate open with `dsh plugin allow-version`.
 
 ```sh
 # recommended — the latest release's prebuilt tarball (stable URL, always current)
@@ -217,8 +223,7 @@ from memory immediately after authentication succeeds.
 
 ![@ Settings](assets/settings.png)
 When the profile composes a settings provider (the Web GUI does), the plugin
-registers a **`dsh-nebula`** settings namespace and a **Settings →
-NebulaGraph** page. There you can:
+owns a **Settings → NebulaGraph** page. There you can:
 
 - **Add** connection presets — each with an **alias** (letters/digits/`_`/`-`,
   ≤ 64 chars), host, port, user, `passwordRef`, TLS mode, per-instance
@@ -232,10 +237,23 @@ NebulaGraph** page. There you can:
   credentials document (`~/.dsh/.credentials.yaml`). The page only ever shows
   whether a value is configured — never the value itself — and inputs always
   start blank.
-- Passwords never enter the settings document: only the `passwordRef`
+- Passwords never enter the stored configuration: only the `passwordRef`
   (credential reference / environment variable name) is stored, and it is
   resolved through the DSH credentials seam at connect time like the
   plugin-config default.
+
+Since dsh-settings 0.2.0 the section is stored **in the plugin's own profile
+entry** (the `instances`, `defaultInstance`, and `credentialRefs` fields of the
+`nebula` row in `cordis.patch.yml`) rather than in a separate settings
+document: dsh derives each entry's editable form from its Config schema, and
+only *volatile* fields are live-editable, so those three fields are declared
+`.volatile()` there. The plugin registers the page with
+`settings.configure({ auto: false })` to opt out of the schema-derived
+automatic page. Upgrading a pre-0.2.0 installation therefore needs a one-time
+move of the old `dsh-nebula:` section from `~/.dsh/settings.yaml` (renamed
+`settings.yaml.imported` by the runtime) into the `nebula` entry's `config:`
+block; the plugin's `instances`/`defaultInstance`/`credentialRefs` field names
+match the old section keys, so the values copy verbatim.
 
 `nebula_connect` resolution order:
 
@@ -252,16 +270,19 @@ an enforced transport policy exactly like plugin config: a conflicting `tls`
 tool argument is rejected.
 
 The page is implemented by the plugin's Web Client bundle
-(`client/NebulaInstancesSection.tsx`), which reads and writes the namespace
+(`client/NebulaInstancesSection.tsx`), which reads and writes the section
 through a **plugin-owned Web route** (`/dsh-nebula/api`, see
 `src/instances-api.ts`) with the same browser-trust fence as the harness
-gateway. A plugin-owned route is required because the harness's own settings
-RPC (`api.settings.*`) serves only namespaces on its explicit exposure
-allowlist — the established third-party pattern in this deployment
-(`dsh-better-sidebar`'s `/sidebar/api`). The host reads the same namespace at
-connect time (`src/instances.ts`). Without a settings provider or a web
-surface the route simply never mounts and the plugin keeps working on plugin
-config alone.
+gateway. The route resolves the entry by the id the Loader records on the
+plugin's fiber and reports it back in every view, so the client can filter
+forwarded `settings/document-updated` events for exactly that namespace. A
+plugin-owned route is still required because the client bundle cannot know the
+profile entry id and because the harness's own settings RPC cannot express the
+plugin's cross-field checks (duplicate aliases, empty hosts), which the route
+runs before every write. The host reads the same live config references at
+connect time (`src/instances.ts`). Without a settings provider or a web surface
+the route simply never mounts and the plugin keeps working on plugin config
+alone.
 
 ## Development
 
@@ -273,7 +294,26 @@ pnpm test      # decoder unit tests + gRPC integration tests (in-process fake Gr
 ```
 
 The package is plain ESM (`"type": "module"`) with no runtime dependencies
-beyond `@grpc/grpc-js`, `@grpc/proto-loader`, and `schemastery`.
+beyond `@grpc/grpc-js`, `@grpc/proto-loader`, and `@deepseek-ai/schemastery`
+(the runtime's schemastery build: only it implements the `.volatile()` config
+fields the settings integration needs).
+
+### Loading a linked development checkout
+
+`dsh plugin --profile <name> add link:<checkout>` installs this package as a
+symlink in the profile, and the profile loader resolves that symlink to its real
+path — so every import inside `lib/` resolves against *this checkout*, not
+against the profile's `node_modules`. A checkout without its own installed
+dependencies therefore fails to load with
+
+```
+Error [ERR_MODULE_NOT_FOUND]: Cannot find package 'schemastery' imported from
+.../dsh-nebula/lib/index.js
+```
+
+Run `pnpm install && pnpm build` in the checkout after any dependency change.
+Installing the packed tarball or the git dependency instead gives a real copy
+with its dependencies nested beside it, at the cost of live edits.
 
 ## How it works
 
@@ -299,13 +339,16 @@ beyond `@grpc/grpc-js`, `@grpc/proto-loader`, and `schemastery`.
   encoding).
 - **Registry** — open connections live in a per-plugin registry; disposing the
   plugin closes them all.
-- **Instance profiles** — the `dsh-nebula` settings namespace is registered
-  through `installSettingsSection` with the plugin config as the composition
-  base: without a settings provider the tools read an empty section and fall
-  back to config exactly as before, while the Web GUI edits the same
-  namespace over the plugin-owned `/dsh-nebula/api` route. Alias resolution
-  and validation are pure functions in `src/instances.ts`, shared by the
-  tools and the settings surface contract.
+- **Instance profiles** — the instance list is part of the plugin's own
+  profile entry: `instances` / `defaultInstance` / `credentialRefs` are
+  `.volatile()` fields of the plugin's `Config` schema, which dsh-settings
+  ≥ 0.2.0 projects into an editable form and commits into the running config's
+  live references — so a settings save never remounts the plugin. Without a
+  settings provider the fields keep their schema defaults (an empty section)
+  and the tools fall back to config exactly as before, while the Web GUI edits
+  the same entry over the plugin-owned `/dsh-nebula/api` route. Alias
+  resolution and validation are pure functions in `src/instances.ts`, shared
+  by the tools and the settings surface contract.
 
 ## License
 

@@ -10,8 +10,10 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import * as grpc from '@grpc/grpc-js'
 import * as protoLoader from '@grpc/proto-loader'
+import { createVolatile, updateVolatile } from '@deepseek-ai/cosmokit'
 import type { ToolDefinition } from '@deepseek-ai/dsh-tools'
-import { apply, Config, NEBULA_SETTINGS_NAMESPACE } from '../src/index.ts'
+import { apply, Config } from '../src/index.ts'
+import type { NebulaInstanceSettings } from '../src/index.ts'
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 
 const protoDir = join(dirname(fileURLToPath(import.meta.url)), '..', 'src', 'proto')
@@ -244,52 +246,73 @@ function startFakeServer(): Promise<{
   })
 }
 
+/** The settings namespace of a loader-mounted plugin: its profile entry id. */
+const SETTINGS_NAMESPACE = 'nebula'
+
+/**
+ * Resolve a profile-shaped raw config through the plugin's own schema, exactly
+ * as the Loader does: defaults filled, volatile fields turned into live
+ * references. The schema's static input type describes the *resolved* refs
+ * while it accepts the plain document at runtime (see the ConfigSchemaMatches
+ * note in src/index.ts), so the call is routed through this one cast.
+ */
+function testConfig(raw: Record<string, unknown> = {}): Config {
+  return (Config as unknown as (value: unknown) => Config)(raw)
+}
+
+/** Read the live instance section out of a resolved plugin config. */
+function sectionOf(config: Config): NebulaInstanceSettings {
+  const defaultInstance = config.defaultInstance.get()
+  return {
+    instances: [...config.instances.get()],
+    ...defaultInstance === undefined ? {} : { defaultInstance },
+    credentialRefs: [...config.credentialRefs.get()],
+  }
+}
+
 /** A minimal stub context exposing just what the plugin's `apply` touches. */
-function stubContext(options?: { credentials?: Record<string, string> }) {
+function stubContext(options?: { credentials?: Record<string, string>; config?: Record<string, unknown> }) {
   const registered = new Map<string, ToolDefinition>()
   const sections: { name: string; order: number; text: string }[] = []
   const disposers: (() => void)[] = []
   const credentialsStore = options?.credentials ?? {}
-  // Minimal settings provider: the plugin's settings inject calls
-  // installSection here, which registers the namespace; tests mutate the
-  // stored section and the registered scope re-resolves it through the real
-  // schema.
-  const settingsSections = new Map<string, { base: unknown; section: unknown; schema: (v: unknown) => unknown }>()
-  // installSection is the provider method the plugin calls now (dsh-settings
-  // ≥ 0.1.2-alpha.2 folded the old installSettingsSection free function into
-  // the provider). The stub mirrors the real one: register with the entry as
-  // base, then hand the source thunk to the plugin so later section writes
-  // re-resolve live.
+  const config = testConfig(options?.config)
+  // Settings provider stub. dsh-settings ≥ 0.2.0 stores a plugin's settings in
+  // the plugin's own profile entry: the entry's Config schema is the storage
+  // contract, `configure` only owns the page policy, and a committed write
+  // lands in the running config's volatile references (the Loader's
+  // `_commitVolatile`). setSettingsSection below does exactly that, so the
+  // tools must observe the new section through the references.
+  let revision = 1
+  const configuredSettings: unknown[] = []
   const settings = {
-    installSection: (
-      _owner: unknown,
-      ns: string,
-      schema: (v: unknown) => unknown,
-      entry: unknown,
-      hooks: { setSource: (source: () => unknown) => void; onChange: () => void },
-    ): void => {
-      settingsSections.set(ns, { base: entry, section: {}, schema })
-      const scope = {
-        get: (): unknown => {
-          const stored = settingsSections.get(ns)!
-          const merged = { ...(stored.base as object), ...(stored.section as object) }
-          return stored.schema(merged)
-        },
-        watch: (): (() => void) => () => {},
-      }
-      hooks.setSource(() => scope.get())
-      hooks.onChange()
+    writable: true,
+    configure: (presentation: unknown, owner: unknown): (() => void) => {
+      configuredSettings.push({ presentation, owner })
+      return () => {}
+    },
+    describe: (): Array<{ ns: string; value: unknown; revision: number }> => [
+      { ns: SETTINGS_NAMESPACE, value: sectionOf(config), revision },
+    ],
+    update: async (_ns: string, patch: Partial<NebulaInstanceSettings>): Promise<void> => {
+      setSettingsSection(patch)
     },
   }
-  const setSettingsSection = (ns: string, section: unknown): void => {
-    const entry = settingsSections.get(ns)
-    if (entry === undefined) throw new Error(`no registered settings namespace ${ns}`)
-    entry.section = section
+  const setSettingsSection = (section: Partial<NebulaInstanceSettings>): void => {
+    if (section.instances !== undefined) updateVolatile(config.instances, createVolatile(section.instances))
+    if (section.defaultInstance !== undefined) {
+      updateVolatile(config.defaultInstance, createVolatile(section.defaultInstance))
+    }
+    if (section.credentialRefs !== undefined) {
+      updateVolatile(config.credentialRefs, createVolatile(section.credentialRefs))
+    }
+    revision += 1
   }
   const ctx = {
-    // A live (non-unloading) stub fiber state mirrors the real provider's
-    // installSection fallback checks.
-    fiber: { state: 0 },
+    // A live (non-unloading) stub fiber mirrors the real plugin's fiber: the
+    // Loader records this plugin's profile entry id there (the settings
+    // namespace), see settingsNamespaceOf in src/instances.ts.
+    fiber: { state: 0, entry: { options: { id: SETTINGS_NAMESPACE } } },
     tools: {
       register: (tool: ToolDefinition): void => {
         registered.set(tool.name, tool)
@@ -333,12 +356,9 @@ function stubContext(options?: { credentials?: Record<string, string> }) {
         },
       }
       // Cordis defers inject callbacks through a microtask checkpoint (the
-      // fiber reload awaits Promise.resolve() before running plugin code), so
-      // the settings source lands AFTER the synchronous apply() returns.
-      // Emulate that timing here, or tests would miss capture-timing bugs —
-      // e.g. the tools holding the initial empty settings thunk while the
-      // real namespace source is assigned later (see the alias tests, which
-      // flush the inject before use).
+      // fiber reload awaits Promise.resolve() before running plugin code);
+      // the settings page policy lands after apply() returns. Emulate that
+      // timing so a capture-timing bug cannot hide behind the stub.
       void Promise.resolve().then(() => callback(sctx as never))
       return () => {}
     },
@@ -348,7 +368,7 @@ function stubContext(options?: { credentials?: Record<string, string> }) {
       return () => {}
     },
   }
-  return { ctx, registered, sections, disposers, settingsSections, setSettingsSection }
+  return { ctx, registered, sections, disposers, config, configuredSettings, setSettingsSection }
 }
 
 function runExec(tool: ToolDefinition, args: unknown): Promise<unknown> {
@@ -357,10 +377,9 @@ function runExec(tool: ToolDefinition, args: unknown): Promise<unknown> {
 }
 
 /**
- * Settle the deferred settings inject (see the stub's `inject`): the
- * namespace registration and `setSource` hook land one microtask after
- * apply(), so tests that read or write the settings section afterwards
- * flush the inject first.
+ * Settle the deferred settings inject (see the stub's `inject`): the settings
+ * page policy lands one microtask after apply(), so tests that edit the
+ * settings section flush the inject first.
  */
 async function flushInject(): Promise<void> {
   await Promise.resolve()
@@ -369,8 +388,8 @@ async function flushInject(): Promise<void> {
 
 describe('dsh-nebula plugin', () => {
   it('registers the four tools and a prompt section', () => {
-    const { ctx, registered, sections } = stubContext()
-    apply(ctx as never, Config({}))
+    const { ctx, registered, sections, config } = stubContext()
+    apply(ctx as never, config)
     assert.deepEqual(
       [...registered.keys()],
       ['nebula_connect', 'nebula_execute', 'nebula_disconnect', 'nebula_schema'],
@@ -379,8 +398,8 @@ describe('dsh-nebula plugin', () => {
   })
 
   it('never exposes a password tool argument; resolves it from passwordRef instead', async () => {
-    const { ctx, registered } = stubContext({ credentials: { NEBULA_TEST_PASSWORD: 'secret' } })
-    apply(ctx as never, Config({}))
+    const { ctx, registered, config } = stubContext({ credentials: { NEBULA_TEST_PASSWORD: 'secret' } })
+    apply(ctx as never, config)
 
     const connectTool = registered.get('nebula_connect')!
     // The model-facing schema must NOT accept a password value — the model can
@@ -408,8 +427,8 @@ describe('dsh-nebula plugin', () => {
     // Plugin config enforces tls: "on". The model-facing tool must NOT be
     // able to relax it (e.g. tls: "auto" would fall back to plaintext and
     // defeat the admin's transport policy).
-    const { ctx, registered } = stubContext({ credentials: { NEBULA_TEST_PASSWORD: 'secret' } })
-    apply(ctx as never, Config({ tls: 'on' }))
+    const { ctx, registered, config } = stubContext({ credentials: { NEBULA_TEST_PASSWORD: 'secret' }, config: { tls: 'on' } })
+    apply(ctx as never, config)
 
     const connectTool = registered.get('nebula_connect')!
     // Passing a conflicting tls argument is rejected outright.
@@ -430,8 +449,8 @@ describe('dsh-nebula plugin', () => {
 
     // Symmetric for tls: "off": downgrading is the only direction that matters,
     // but conflicting overrides are rejected in both directions.
-    const ctx2 = stubContext({ credentials: { NEBULA_TEST_PASSWORD: 'secret' } })
-    apply(ctx2.ctx as never, Config({ tls: 'off' }))
+    const ctx2 = stubContext({ credentials: { NEBULA_TEST_PASSWORD: 'secret' }, config: { tls: 'off' } })
+    apply(ctx2.ctx as never, ctx2.config)
     const connectTool2 = ctx2.registered.get('nebula_connect')!
     await assert.rejects(
       () => runExec(connectTool2, { host: '192.168.8.187', port: 39669, user: 'root', tls: 'auto' }),
@@ -442,8 +461,8 @@ describe('dsh-nebula plugin', () => {
   it('connects, executes, and disconnects end-to-end', async () => {
     const fakeServer = await startFakeServer()
     try {
-      const { ctx, registered, disposers } = stubContext({ credentials: { NEBULA_TEST_PASSWORD: 'secret' } })
-      apply(ctx as never, Config({}))
+      const { ctx, registered, disposers, config } = stubContext({ credentials: { NEBULA_TEST_PASSWORD: 'secret' } })
+      apply(ctx as never, config)
 
       const connectTool = registered.get('nebula_connect')!
       const executeTool = registered.get('nebula_execute')!
@@ -499,8 +518,8 @@ describe('dsh-nebula plugin', () => {
   it('resolves node primary keys from DESC GRAPH TYPE for graph results', async () => {
     const fakeServer = await startFakeServer()
     try {
-      const { ctx, registered } = stubContext({ credentials: { NEBULA_TEST_PASSWORD: 'secret' } })
-      apply(ctx as never, Config({}))
+      const { ctx, registered, config } = stubContext({ credentials: { NEBULA_TEST_PASSWORD: 'secret' } })
+      apply(ctx as never, config)
 
       const connectTool = registered.get('nebula_connect')!
       const executeTool = registered.get('nebula_execute')!
@@ -538,8 +557,8 @@ describe('dsh-nebula plugin', () => {
   it('introspects a graph schema with nebula_schema (SESSION SET graph + explicit graph)', async () => {
     const fakeServer = await startFakeServer()
     try {
-      const { ctx, registered } = stubContext({ credentials: { NEBULA_TEST_PASSWORD: 'secret' } })
-      apply(ctx as never, Config({}))
+      const { ctx, registered, config } = stubContext({ credentials: { NEBULA_TEST_PASSWORD: 'secret' } })
+      apply(ctx as never, config)
 
       const connectTool = registered.get('nebula_connect')!
       const executeTool = registered.get('nebula_execute')!
@@ -605,24 +624,28 @@ describe('dsh-nebula plugin', () => {
     }
   })
 
-  it('registers the dsh-nebula settings namespace when a settings provider exists', async () => {
-    const { ctx, settingsSections } = stubContext()
-    apply(ctx as never, Config({}))
+  it('opts the plugin entry out of the schema-derived settings page', async () => {
+    // dsh-settings >= 0.2.0 derives one page per profile entry; the plugin
+    // owns its Settings -> NebulaGraph page, so apply() registers
+    // `auto: false` against its OWN fiber (the provider defaults to the
+    // provider's fiber, not the plugin's).
+    const { ctx, config, configuredSettings } = stubContext()
+    apply(ctx as never, config)
     await flushInject()
-    assert.ok(settingsSections.has(NEBULA_SETTINGS_NAMESPACE), 'namespace must be registered')
+    assert.deepEqual(configuredSettings, [{ presentation: { auto: false }, owner: ctx.fiber }])
   })
 
   it('connects to a configured instance by alias (host/port/user/passwordRef/tls from the profile)', async () => {
     const fakeServer = await startFakeServer()
     try {
-      const { ctx, registered, setSettingsSection } = stubContext({ credentials: { INSTANCE_PW: 'secret' } })
-      apply(ctx as never, Config({}))
+      const { ctx, registered, setSettingsSection, config } = stubContext({ credentials: { INSTANCE_PW: 'secret' } })
+      apply(ctx as never, config)
       // The settings source lands after apply() (cordis defers inject
       // callbacks); the tools must pick up the committed section at call
       // time rather than the empty fallback they saw at registration.
       await flushInject()
       // The profile points at the fake server with its own credentials.
-      setSettingsSection(NEBULA_SETTINGS_NAMESPACE, {
+      setSettingsSection({
         instances: [{
           alias: 'dev',
           host: '127.0.0.1',
@@ -663,10 +686,10 @@ describe('dsh-nebula plugin', () => {
   })
 
   it('rejects an unknown instance alias and lists the configured aliases', async () => {
-    const { ctx, registered, setSettingsSection } = stubContext()
-    apply(ctx as never, Config({}))
+    const { ctx, registered, setSettingsSection, config } = stubContext()
+    apply(ctx as never, config)
     await flushInject()
-    setSettingsSection(NEBULA_SETTINGS_NAMESPACE, {
+    setSettingsSection({
       instances: [{ alias: 'dev', host: '127.0.0.1' }, { alias: 'prod', host: '10.0.0.1' }],
     })
     const connectTool = registered.get('nebula_connect')!
@@ -679,10 +702,10 @@ describe('dsh-nebula plugin', () => {
   it('uses the default instance when no alias is given (viaDefault), and warns on a stale default', async () => {
     const fakeServer = await startFakeServer()
     try {
-      const { ctx, registered, setSettingsSection } = stubContext({ credentials: { INSTANCE_PW: 'secret' } })
-      apply(ctx as never, Config({ host: '192.168.8.187', port: 39669, user: 'root' }))
+      const { ctx, registered, setSettingsSection, config } = stubContext({ credentials: { INSTANCE_PW: 'secret' }, config: { host: '192.168.8.187', port: 39669, user: 'root' } })
+      apply(ctx as never, config)
       await flushInject()
-      setSettingsSection(NEBULA_SETTINGS_NAMESPACE, {
+      setSettingsSection({
         instances: [{ alias: 'dev', host: '127.0.0.1', port: fakeServer.port, passwordRef: 'INSTANCE_PW' }],
         defaultInstance: 'dev',
       })
@@ -704,7 +727,7 @@ describe('dsh-nebula plugin', () => {
 
       // A stale default (deleted instance) degrades to plugin-config
       // defaults instead of failing, and the caller is told.
-      setSettingsSection(NEBULA_SETTINGS_NAMESPACE, {
+      setSettingsSection({
         instances: [],
         defaultInstance: 'gone',
       })
@@ -727,10 +750,10 @@ describe('dsh-nebula plugin', () => {
   })
 
   it('enforces a non-auto tls policy from the instance profile', async () => {
-    const { ctx, registered, setSettingsSection } = stubContext()
-    apply(ctx as never, Config({}))
+    const { ctx, registered, setSettingsSection, config } = stubContext()
+    apply(ctx as never, config)
     await flushInject()
-    setSettingsSection(NEBULA_SETTINGS_NAMESPACE, {
+    setSettingsSection({
       instances: [{ alias: 'locked', host: '10.0.0.1', tls: 'on' }],
     })
     const connectTool = registered.get('nebula_connect')!

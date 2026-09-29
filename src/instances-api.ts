@@ -1,18 +1,21 @@
 /**
  * Plugin-owned Web API backing the Settings → NebulaGraph page.
  *
- * The harness's settings RPC (`api.settings.*`) serves only namespaces on its
- * explicit exposure allowlist (`WEB_SETTINGS_NAMESPACES` in the api proxy), so
- * a third-party plugin cannot make its namespace remotely editable through
- * that seam. The established plugin-owned pattern — dsh-better-sidebar's
- * `/sidebar/api` — is a webServer route with a browser-trust fence, reading
- * and writing the namespace through the settings provider directly. This
- * module implements that route for the `dsh-nebula` namespace.
+ * dsh-settings ≥ 0.2.0 stores settings in the plugin's own profile entry, so
+ * the section lives in the Config schema of the `dsh-nebula` row (see
+ * ./instances.ts) rather than in a third-party settings namespace. The
+ * harness's settings RPC addresses entries by profile id, which the client
+ * bundle cannot know (the id is chosen by whoever mounts the plugin), so the
+ * established plugin-owned pattern still applies: a webServer route with a
+ * browser-trust fence, reading and writing the entry through the settings
+ * provider directly. The route resolves the entry by the id the Loader
+ * recorded on the plugin's fiber and reports it back in every view, so the
+ * client can filter forwarded `settings/document-updated` events.
  *
  * Wire contract (JSON, POST to `/dsh-nebula/api/<method>`):
- * - `instances.get`    → `{ ok, value: { value, revision, writable } }`
+ * - `instances.get`    → `{ ok, value: { value, revision, writable, namespace } }`
  * - `instances.update` → payload `{ section, revision? }` →
- *                        `{ ok, value: { value, revision, writable } }`
+ *                        `{ ok, value: { value, revision, writable, namespace } }`
  * Errors answer `{ ok: false, error: { code, message } }` with a matching
  * HTTP status. The route never exposes secrets: the section carries only
  * credential *references* (`passwordRef`), never password values.
@@ -20,24 +23,28 @@
 
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { Context } from '@deepseek-ai/cordis'
-import { NEBULA_SETTINGS_NAMESPACE } from './instances.ts'
+import { validateInstanceSettings } from './instances.ts'
 import type { NebulaInstanceSettings } from './instances.ts'
 
 /** Route prefix registered on the webServer. */
 export const NEBULA_API_PREFIX = '/dsh-nebula/api'
 
-/** The wire view of the namespace: the resolved section plus write facts. */
+/** The wire view of the entry: the resolved section plus write facts. */
 export interface InstancesView {
   value: NebulaInstanceSettings
   /** Revision fencing the next write; undefined before the first read. */
   revision?: number
   /** Whether the settings document accepts writes. */
   writable: boolean
+  /**
+   * Profile entry id the section was read from (the settings namespace).
+   * The client compares forwarded document-updated events against it.
+   */
+  namespace: string
 }
 
 /** Settings-provider face the route needs (structural — no package import). */
 export interface SettingsFace {
-  get(ns: string): unknown
   describe(options?: { redactSecrets?: boolean }): Array<{ ns: string; value: unknown; revision: number }>
   update(ns: string, patch: object, expectedRevision?: number): Promise<void>
   readonly writable: boolean
@@ -124,30 +131,34 @@ export function trustedHostsOf(loader: LoaderFace): string[] {
 
 // ── View + write logic (pure, unit-testable) ────────────────────────────────
 
-/** Read the current namespace view from the settings provider. */
-export function readInstancesView(settings: SettingsFace): InstancesView {
+/** Read the current instance-profiles view from the settings provider. */
+export function readInstancesView(settings: SettingsFace, namespace: string): InstancesView {
   const descriptor = settings.describe({ redactSecrets: true })
-    .find((entry) => entry.ns === String(NEBULA_SETTINGS_NAMESPACE))
+    .find((entry) => entry.ns === namespace)
   return {
     value: (descriptor?.value ?? { instances: [] }) as NebulaInstanceSettings,
     ...descriptor === undefined ? {} : { revision: descriptor.revision },
     writable: settings.writable,
+    namespace,
   }
 }
 
 /**
  * Apply one client-supplied section. The client always sends the complete
- * `{ instances, defaultInstance }` pair, so a merge update over the current
- * user layer replaces both fields; an empty `defaultInstance` clears the
- * default. Schema validation and the cross-field `validate` hook run in the
- * provider, so an invalid section rejects here with the provider's message.
+ * `{ instances, defaultInstance, credentialRefs }` triple, so a merge update
+ * over the current user layer replaces each field; an empty `defaultInstance`
+ * clears the default. The provider validates the section against the Config
+ * schema (rejecting the write with its message) and this function runs the
+ * cross-field checks the schema cannot express before any write.
  *
  * @param settings - the settings provider.
+ * @param namespace - profile entry id holding the section.
  * @param payload - the raw POST body of `instances.update`.
  * @returns the fresh view after the committed write.
  */
 export async function applyInstancesUpdate(
   settings: SettingsFace,
+  namespace: string,
   payload: unknown,
 ): Promise<InstancesView> {
   if (typeof payload !== 'object' || payload === null || Array.isArray(payload)) {
@@ -158,13 +169,18 @@ export async function applyInstancesUpdate(
   if (typeof section !== 'object' || section === null || Array.isArray(section)) {
     throw new TypeError('instances.update requires a section object')
   }
+  const candidate = section as Record<string, unknown>
+  if (!Array.isArray(candidate.instances)) {
+    throw new TypeError('instances.update section requires an instances array')
+  }
+  validateInstanceSettings(candidate as unknown as NebulaInstanceSettings)
   const expectedRevision = typeof body.revision === 'number' ? body.revision : undefined
   await settings.update(
-    NEBULA_SETTINGS_NAMESPACE,
+    namespace,
     section as object,
     expectedRevision,
   )
-  return readInstancesView(settings)
+  return readInstancesView(settings, namespace)
 }
 
 // ── HTTP plumbing ───────────────────────────────────────────────────────────
@@ -207,10 +223,19 @@ export function methodOf(pathname: string, prefix = NEBULA_API_PREFIX): string |
   return rest
 }
 
-/** Build the request handler for the plugin route. */
+/**
+ * Build the request handler for the plugin route.
+ *
+ * @param settings - the settings provider.
+ * @param trustedHosts - deployment-trusted authorities beyond loopback.
+ * @param namespace - profile entry id holding the section, or undefined when
+ *   the plugin was composed without the Loader (every method then reports
+ *   `settings-unavailable` instead of writing to a guessed entry).
+ */
 export function createInstancesApiHandler(
   settings: SettingsFace,
   trustedHosts: readonly string[],
+  namespace: string | undefined,
 ): (req: IncomingMessage, res: ServerResponse) => Promise<void> {
   return async (req, res) => {
     if (!isTrustedApiRequest(req, trustedHosts)) {
@@ -233,6 +258,13 @@ export function createInstancesApiHandler(
       writeJson(res, 404, fail('not-found', 'unknown dsh-nebula api method'))
       return
     }
+    if (namespace === undefined) {
+      writeJson(res, 503, fail(
+        'settings-unavailable',
+        'dsh-nebula has no profile entry id: Settings → NebulaGraph requires the plugin to be mounted by the DSH profile loader',
+      ))
+      return
+    }
     let payload: unknown
     try {
       payload = await readBody(req)
@@ -243,10 +275,10 @@ export function createInstancesApiHandler(
     try {
       switch (method) {
         case 'instances.get':
-          writeJson(res, 200, ok(readInstancesView(settings)))
+          writeJson(res, 200, ok(readInstancesView(settings, namespace)))
           return
         case 'instances.update':
-          writeJson(res, 200, ok(await applyInstancesUpdate(settings, payload)))
+          writeJson(res, 200, ok(await applyInstancesUpdate(settings, namespace, payload)))
           return
         default:
           writeJson(res, 404, fail('not-found', `unknown dsh-nebula api method "${method}"`))
@@ -266,11 +298,12 @@ export function registerInstancesApi(
   settings: SettingsFace,
   webServer: WebServerFace,
   loader: LoaderFace,
+  namespace: string | undefined,
 ): () => void {
   const trustedHosts = trustedHostsOf(loader)
   return webServer.register({
     kind: 'prefix',
     path: NEBULA_API_PREFIX,
-    handler: createInstancesApiHandler(settings, trustedHosts),
+    handler: createInstancesApiHandler(settings, trustedHosts, namespace),
   })
 }

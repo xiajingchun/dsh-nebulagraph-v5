@@ -9,13 +9,18 @@
 
 import type { NebulaInstanceSettings } from './nebula-instances.ts'
 
-/** The wire view of the namespace: resolved section plus write facts. */
+/** The wire view of the entry: resolved section plus write facts. */
 export interface InstancesView {
   value: NebulaInstanceSettings
   /** Revision fencing the next write; undefined before the first read. */
   revision?: number
   /** Whether the settings document accepts writes. */
   writable: boolean
+  /**
+   * Profile entry id the section was read from (the settings namespace).
+   * Forwarded `settings/document-updated` events carry this id.
+   */
+  namespace: string
 }
 
 /** One wire failure of the instances API. */

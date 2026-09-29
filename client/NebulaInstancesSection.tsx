@@ -1,12 +1,13 @@
 /**
  * NebulaGraph instance profiles — the Settings → NebulaGraph section.
  *
- * Renders the named instances of the `dsh-nebula` settings namespace as
- * cards, with add / edit / delete and a default-instance pick. Data flows
- * through the plugin-owned `/dsh-nebula/api` route (the harness's settings
- * RPC does not expose third-party namespaces): the section reads the current
- * view on mount, writes whole-section updates on save, and re-reads when the
- * host broadcasts `settings/document-updated` for this namespace.
+ * Renders the named instances of the plugin's own profile entry as cards,
+ * with add / edit / delete and a default-instance pick. Data flows through
+ * the plugin-owned `/dsh-nebula/api` route (which resolves the entry id the
+ * Loader assigned to the plugin and runs its cross-field checks): the section
+ * reads the current view on mount, writes whole-section updates on save, and
+ * re-reads when the host broadcasts `settings/document-updated` for that
+ * entry.
  *
  * Copy follows the active locale through the framework `t` seat (dictionary
  * namespace `settings.nebula`, see ./locales.ts).
