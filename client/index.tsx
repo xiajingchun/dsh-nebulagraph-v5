@@ -55,13 +55,13 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
 export const NS = 'settings.nebula'
 
 /**
- * Wire contract with the host plugin (`src/index.ts`): the settings namespace
- * the section reads and writes, and the plugin-owned API route backing it.
- * The host registers the namespace as `NEBULA_SETTINGS_NAMESPACE`; the client
- * names it by the same literal (used to filter forwarded document-updated
- * events) and calls `/dsh-nebula/api/*`.
+ * Wire contract with the host plugin (`src/index.ts`): the plugin-owned API
+ * route backing the settings section. Since dsh-settings ≥ 0.2.0 the section
+ * lives in the plugin's own profile entry, whose id is chosen by whoever
+ * mounts the plugin — the host route reports it in every view, and this
+ * module remembers the latest one to filter forwarded document-updated
+ * events for exactly that namespace.
  */
-const NEBULA_SETTINGS_NAMESPACE = 'dsh-nebula'
 
 /** Graph payload projected by the host `nebula_execute` tool. */
 interface GraphProjection {
@@ -883,16 +883,30 @@ export function apply(ctx: ClientContext): void {
   }, NebulaGraphView))
 
   // Settings → NebulaGraph: one nav section managing the named instances.
-  // The host registers a `dsh-nebula` settings namespace and serves it over
-  // the plugin-owned /dsh-nebula/api route (the harness settings RPC exposes
-  // only allowlisted namespaces); the section reads/writes through that route
-  // and refreshes on forwarded document-updated events for this namespace.
+  // The host stores the section in the plugin's own profile entry (the entry
+  // id is its settings namespace) and serves it over the plugin-owned
+  // /dsh-nebula/api route; the section reads/writes through that route and
+  // refreshes on forwarded document-updated events for that namespace.
   const t = ctx.locale.bind(NS)
+  // Latest settings namespace reported by the host route (the plugin's
+  // profile entry id, which this bundle cannot know statically). Undefined
+  // before the first read: until then every document update refreshes.
+  let settingsNamespace: string | undefined
+  const loadInstances = async (): Promise<InstancesView> => {
+    const view = await instancesApi.get()
+    settingsNamespace = view.namespace
+    return view
+  }
+  const updateInstances = async (section: NebulaInstanceSettings, revision?: number): Promise<InstancesView> => {
+    const view = await instancesApi.update(section, revision)
+    settingsNamespace = view.namespace
+    return view
+  }
   const subscribeInstances = (listener: () => void): (() => void) => {
     const remote = ctx.get('remote') as RemoteLike | undefined
     if (remote === undefined) return () => {}
     return remote.$on('settings/document-updated', (ns) => {
-      if (ns === NEBULA_SETTINGS_NAMESPACE) listener()
+      if (settingsNamespace === undefined || ns === settingsNamespace) listener()
     })
   }
   // Credential values never leave the Host: describe reports only
@@ -948,8 +962,8 @@ export function apply(ctx: ClientContext): void {
     label: () => t('nav'),
     locale: NS,
     inject: () => ({
-      load: (): Promise<InstancesView> => instancesApi.get(),
-      update: (section: NebulaInstanceSettings, revision?: number) => instancesApi.update(section, revision),
+      load: loadInstances,
+      update: updateInstances,
       subscribe: subscribeInstances,
       ...credentialFns,
       subscribeCredentials,

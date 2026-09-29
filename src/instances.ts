@@ -1,33 +1,26 @@
 /**
  * NebulaGraph instance profiles — user-managed connection presets.
  *
- * The plugin registers a `dsh-nebula` settings namespace holding a list of
- * named instances. Each instance carries its own connection parameters
+ * The instance list is part of the plugin's own configuration entry (the
+ * `nebula` row of the active profile): dsh-settings ≥ 0.2.0 derives settings
+ * pages from each loader entry's Config schema, so `instances`,
+ * `defaultInstance`, and `credentialRefs` are declared as *volatile* Config
+ * fields (see ./index.ts). Volatile fields are validated and committed into
+ * the running plugin's config references in place, so a settings write never
+ * remounts the plugin. Each instance carries its own connection parameters
  * (host, port, user, passwordRef, TLS policy, timeouts), addressed by a
  * short `alias` the model can type directly ("connect to the `prod` Nebula").
  *
- * This module owns the shared vocabulary: the namespace id, the instance
- * record type, the schemastery schema the settings provider validates writes
- * against, the cross-field validation, and the pure alias-lookup helpers used
- * by the tools and the settings Web API. The Web Client mirrors the JSON
- * shapes in `client/nebula-instances.ts` (bundle purity — it never imports
- * host code).
+ * This module owns the shared vocabulary: the instance record type, the
+ * schemastery schemas (the plain settings-section schema and the volatile
+ * Config fields), the cross-field validation, the entry-id resolution, and
+ * the pure alias-lookup helpers used by the tools and the settings Web API.
+ * The Web Client mirrors the JSON shapes in `client/nebula-instances.ts`
+ * (bundle purity — it never imports host code).
  */
 
-import z from 'schemastery'
+import z from '@deepseek-ai/schemastery'
 import type { TlsMode } from './nebula-client.ts'
-
-/**
- * Settings namespace of the named instance profiles. Registered only when a
- * settings provider is composed; the Web Client reads and writes it through
- * the plugin-owned `/dsh-nebula/api` route (the harness's own settings RPC
- * serves only namespaces on its explicit exposure allowlist).
- *
- * dsh-settings ≥ 0.1.2-alpha.2 dropped the `settingsNamespace()` branding
- * helper: namespaces are now plain lowercase-kebab strings validated by the
- * provider (`SettingsProvider.installSection`).
- */
-export const NEBULA_SETTINGS_NAMESPACE = 'dsh-nebula'
 
 /**
  * Alias grammar: a short POSIX-ish identifier the model types in prompts and
@@ -77,7 +70,7 @@ export interface NebulaInstance {
   note?: string
 }
 
-/** The `dsh-nebula` settings namespace section: instances + default pick. */
+/** The instance-profiles section: instances + default pick (settings storage). */
 export interface NebulaInstanceSettings {
   /** All named instances, in display order. */
   instances: NebulaInstance[]
@@ -113,7 +106,7 @@ export const NebulaInstanceSchema: z<NebulaInstance> = z.object({
   note: z.string(),
 })
 
-/** Schemastery schema of the whole `dsh-nebula` namespace section. */
+/** Schemastery schema of the whole instance-profiles section (plain shape). */
 export const NebulaInstanceSettingsSchema: z<NebulaInstanceSettings> = z.object({
   instances: z.array(NebulaInstanceSchema).default([]),
   defaultInstance: z.string(),
@@ -121,8 +114,40 @@ export const NebulaInstanceSettingsSchema: z<NebulaInstanceSettings> = z.object(
 })
 
 /**
- * Cross-field validation run by the settings provider on every stored
- * section (and at registration). Only per-instance facts are checked — a
+ * The volatile Config fields of the plugin's own entry: dsh-settings ≥ 0.2.0
+ * derives an editable form from the Config schema of every loader entry and
+ * only admits fields whose nearest volatile ancestor marks them live. These
+ * three fields are therefore the Settings → NebulaGraph section's storage;
+ * the schema library must be `@deepseek-ai/schemastery`, whose `.volatile()`
+ * produces the shared config references the Loader commits in place.
+ */
+export const NebulaInstanceSettingsFields = {
+  instances: z.array(NebulaInstanceSchema).default([]).volatile(),
+  defaultInstance: z.string().volatile(),
+  credentialRefs: z.array(z.string().pattern(CREDENTIAL_REF_PATTERN)).default([]).volatile(),
+} as const
+
+/**
+ * The settings namespace of a loader-mounted plugin instance: dsh-settings ≥
+ * 0.2.0 names every namespace by its profile entry id (`entry.options.id`),
+ * which the Loader records on the plugin's fiber. Absent when the plugin was
+ * composed programmatically without the Loader — the Web API then reports the
+ * settings surface as unavailable instead of guessing an id.
+ *
+ * @param fiber - the plugin's own cordis fiber (`ctx.fiber`).
+ * @returns the profile entry id, or undefined without one.
+ */
+export function settingsNamespaceOf(fiber: unknown): string | undefined {
+  const entry = (fiber as { entry?: { options?: { id?: unknown } } } | undefined)?.entry
+  const id = entry?.options?.id
+  return typeof id === 'string' && id.length > 0 ? id : undefined
+}
+
+/**
+ * Cross-field validation over one complete section. dsh-settings ≥ 0.2.0
+ * validates writes with the Config schema alone (there is no provider-side
+ * validate hook any more), so the plugin-owned Web API calls this before
+ * handing a section to the provider. Only per-instance facts are checked — a
  * stale `defaultInstance` is tolerated deliberately so a settings UI can
  * delete an instance and clear the default in separate writes.
  *

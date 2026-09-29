@@ -20,12 +20,15 @@
  * @module dsh-nebula
  */
 
-import type { Context } from '@deepseek-ai/cordis'
+// `Volatile` is the live-config reference a schemastery `.volatile()` field
+// resolves to; cordis re-exports it from cosmokit, and it is type-only here,
+// so no runtime dependency is added.
+import type { Context, Volatile } from '@deepseek-ai/cordis'
 // Type-only import: pulls in dsh-settings' `Context.settings` module
 // augmentation (the provider methods are reached via ctx.inject below, so no
 // runtime import is needed). Same pattern as the harness's own consumers.
 import type {} from '@deepseek-ai/dsh-settings'
-import z from 'schemastery'
+import z from '@deepseek-ai/schemastery'
 import { ConnectionRegistry } from './registry.ts'
 import { applyGqlSkillProvider } from './skill.ts'
 import { applyNebulaTools } from './tools.ts'
@@ -33,21 +36,21 @@ import type { NebulaToolDefaults } from './tools.ts'
 import type { TlsMode } from './nebula-client.ts'
 import { registerInstancesApi } from './instances-api.ts'
 import {
-  NEBULA_SETTINGS_NAMESPACE,
-  NebulaInstanceSettingsSchema,
-  validateInstanceSettings,
+  NebulaInstanceSettingsFields,
+  settingsNamespaceOf,
 } from './instances.ts'
 import type { NebulaInstance, NebulaInstanceSettings } from './instances.ts'
 
 export {
   INSTANCE_ALIAS_PATTERN,
-  NEBULA_SETTINGS_NAMESPACE,
   NebulaInstanceSchema,
+  NebulaInstanceSettingsFields,
   NebulaInstanceSettingsSchema,
   defaultAliasOf,
   findInstance,
   listAliases,
   resolveInstanceSource,
+  settingsNamespaceOf,
   validateInstanceSettings,
 } from './instances.ts'
 export type { NebulaInstance, NebulaInstanceSettings } from './instances.ts'
@@ -103,9 +106,19 @@ export interface Config {
   timeoutMs?: number
   /** Upper bound on concurrently open connections. */
   maxConnections?: number
+  /**
+   * Named connection presets managed by Settings → NebulaGraph. Live
+   * (volatile) storage: dsh-settings ≥ 0.2.0 edits the plugin's own profile
+   * entry and commits volatile values into the running config in place.
+   */
+  instances: Volatile<NebulaInstance[]>
+  /** Alias of the instance used when `nebula_connect` omits `instance`. */
+  defaultInstance: Volatile<string | undefined>
+  /** Credential references the settings page offers controls for. */
+  credentialRefs: Volatile<string[]>
 }
 
-export const Config: z<Config> = z.object({
+export const Config = z.object({
   host: z.string().default('127.0.0.1'),
   port: z.number().default(9669),
   user: z.string().default('root'),
@@ -118,7 +131,19 @@ export const Config: z<Config> = z.object({
   servername: z.string(),
   timeoutMs: z.number().default(30_000),
   maxConnections: z.number().default(5),
+  ...NebulaInstanceSettingsFields,
 })
+
+/**
+ * Compile-time proof that the schema above resolves to the documented
+ * {@link Config} shape (the type `apply` receives). The schema cannot be
+ * *annotated* `z<Config>`: a volatile field accepts plain data as input and
+ * resolves to a live reference, so the schema's input and output types differ
+ * by design.
+ */
+type AssertTrue<T extends true> = T
+const configSchemaMatches: AssertTrue<Schemastery.TypeT<typeof Config> extends Config ? true : false> = true
+void configSchemaMatches
 
 /** Resolve the validated config into tool defaults. */
 function resolveConfig(config: Config): NebulaToolDefaults {
@@ -148,7 +173,7 @@ function resolveConfig(config: Config): NebulaToolDefaults {
 
 /**
  * Plugin entry: register the NebulaGraph tools, the instance-profile settings
- * namespace (when a settings provider exists), and a short guidance section,
+ * storage (when a settings provider exists), and a short guidance section,
  * and close every open session when the plugin unloads.
  *
  * @param ctx - plugin context (tools + systemPrompt services).
@@ -158,35 +183,39 @@ export function apply(ctx: Context, config: Config): void {
   const defaults = resolveConfig(config)
   const registry = new ConnectionRegistry()
 
-  // The instance profiles live in the `dsh-nebula` settings namespace when a
-  // settings provider exists; without one the source is an empty section and
-  // the tools fall back to plugin-config defaults exactly as before.
-  let instanceSettings: () => NebulaInstanceSettings = () => ({ instances: [] })
-  // installSection reassigns this binding asynchronously: cordis defers
-  // inject callbacks through a microtask checkpoint (the fiber reload awaits
-  // Promise.resolve() before running plugin code), so the reassignment always
-  // lands AFTER this synchronous apply() returns. Anything that needs the
-  // current section must therefore read through the binding at call time —
-  // never capture its initial value (see applyNebulaTools below). The wiring
-  // itself (installSection) lives on the settings provider since
-  // dsh-settings 0.1.2-alpha.2 replaced the old installSettingsSection free
-  // function with the provider method.
+  // The instance profiles live in this plugin's own profile entry (the
+  // `instances` / `defaultInstance` / `credentialRefs` volatile Config
+  // fields); without a settings provider the section is simply the config
+  // defaults (empty) and the tools fall back to plugin-config defaults
+  // exactly as before. Reading through the volatile references at call time
+  // always yields the freshly committed value — a settings write updates
+  // them in place and never remounts the plugin, so nothing here may capture
+  // a snapshot (see applyNebulaTools below).
+  const instanceSettings = (): NebulaInstanceSettings => {
+    const defaultInstance = config.defaultInstance?.get()
+    return {
+      instances: [...(config.instances?.get() ?? [])],
+      ...defaultInstance === undefined ? {} : { defaultInstance },
+      credentialRefs: [...(config.credentialRefs?.get() ?? [])],
+    }
+  }
+
+  // Settings → NebulaGraph is a plugin-owned page (`settings.section` in the
+  // Web Client), so opt this entry out of the schema-derived automatic page.
+  // dsh-settings ≥ 0.2.0 replaced the old `installSection`/`validate` hooks:
+  // the entry's Config schema is the storage contract, `configure` only owns
+  // the page policy, and cross-field checks now run in the Web API before a
+  // write (see applyInstancesUpdate).
   ctx.inject(['settings'], (settingsCtx) => {
-    settingsCtx.settings.installSection(ctx, NEBULA_SETTINGS_NAMESPACE, NebulaInstanceSettingsSchema, { instances: [] }, {
-      setSource: (source) => {
-        instanceSettings = source
-      },
-      // The tools project the section per connect call, so a committed change
-      // needs no re-registration (same pattern as the DeepSeek search provider).
-      onChange: () => {},
-      validate: validateInstanceSettings,
-    })
+    settingsCtx.effect(() => settingsCtx.settings.configure({ auto: false }, ctx.fiber))
   })
 
   // Settings → NebulaGraph page transport: a plugin-owned webServer route
-  // (the harness's settings RPC does not expose third-party namespaces).
+  // (the client bundle cannot know this plugin's profile entry id, and the
+  // harness's settings RPC offers no cross-field validation).
   // Registered only when a web surface + settings provider + loader are
   // composed — headless deployments simply never mount the route.
+  const settingsNamespace = settingsNamespaceOf(ctx.fiber)
   ctx.inject(['settings', 'webServer', 'loader'], (sctx) => {
     // The injected services arrive as context properties; read them through
     // `get` with structural faces (the plugin does not depend on the
@@ -196,6 +225,7 @@ export function apply(ctx: Context, config: Config): void {
       sctx.get('settings') as never,
       sctx.get('webServer') as never,
       sctx.get('loader') as never,
+      settingsNamespace,
     ), 'dsh-nebula: instances api route')
   })
 

@@ -1,13 +1,12 @@
 /**
  * Unit tests for the plugin-owned instances Web API (src/instances-api.ts):
- * the browser-trust fence, the method dispatcher, the namespace view/write
- * logic, and the full HTTP handler against fake req/res objects.
+ * the browser-trust fence, the method dispatcher, the entry view/write logic,
+ * and the full HTTP handler against fake req/res objects.
  */
 
 import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
 import type { IncomingMessage, ServerResponse } from 'node:http'
-import { NEBULA_SETTINGS_NAMESPACE } from '../src/index.ts'
 import {
   applyInstancesUpdate,
   createInstancesApiHandler,
@@ -19,20 +18,24 @@ import {
 } from '../src/index.ts'
 import type { SettingsFace } from '../src/index.ts'
 
+/** The profile entry id the section lives in (chosen by whoever mounts the plugin). */
+const NAMESPACE = 'nebula'
+
 /** In-memory settings provider stub matching the structural SettingsFace. */
 class FakeSettings implements SettingsFace {
   readonly writable = true
   private doc: Record<string, unknown> = {}
   private revision = 1
 
-  get(ns: string): unknown {
+  /** Test-only read of the persisted section (the real provider exposes no get). */
+  stored(ns: string): unknown {
     return this.doc[ns]
   }
 
   describe(): Array<{ ns: string; value: unknown; revision: number }> {
     return [{
-      ns: String(NEBULA_SETTINGS_NAMESPACE),
-      value: structuredClone(this.doc[String(NEBULA_SETTINGS_NAMESPACE)] ?? { instances: [] }),
+      ns: NAMESPACE,
+      value: structuredClone(this.doc[NAMESPACE] ?? { instances: [] }),
       revision: this.revision,
     }]
   }
@@ -141,19 +144,26 @@ describe('methodOf', () => {
 })
 
 describe('readInstancesView', () => {
-  it('returns the resolved section with revision and writable', () => {
+  it('returns the resolved section with revision, writable, and namespace', () => {
     const settings = new FakeSettings()
-    const view = readInstancesView(settings)
+    const view = readInstancesView(settings, NAMESPACE)
     assert.deepEqual(view.value, { instances: [] })
     assert.equal(view.revision, 1)
     assert.equal(view.writable, true)
+    assert.equal(view.namespace, NAMESPACE)
+  })
+  it('falls back to an empty section while the entry is not configurable yet', () => {
+    const view = readInstancesView(new FakeSettings(), 'other-entry')
+    assert.deepEqual(view.value, { instances: [] })
+    assert.equal(view.revision, undefined)
+    assert.equal(view.namespace, 'other-entry')
   })
 })
 
 describe('applyInstancesUpdate', () => {
   it('writes the section and returns the fresh view', async () => {
     const settings = new FakeSettings()
-    const view = await applyInstancesUpdate(settings, {
+    const view = await applyInstancesUpdate(settings, NAMESPACE, {
       section: { instances: [{ alias: 'dev', host: '10.0.0.1' }], defaultInstance: 'dev' },
     })
     assert.equal(view.value.instances.length, 1)
@@ -163,8 +173,23 @@ describe('applyInstancesUpdate', () => {
   })
   it('rejects a non-object payload or section', async () => {
     const settings = new FakeSettings()
-    await assert.rejects(() => applyInstancesUpdate(settings, null), /payload must be a plain object/)
-    await assert.rejects(() => applyInstancesUpdate(settings, { section: 'nope' }), /section object/)
+    await assert.rejects(() => applyInstancesUpdate(settings, NAMESPACE, null), /payload must be a plain object/)
+    await assert.rejects(() => applyInstancesUpdate(settings, NAMESPACE, { section: 'nope' }), /section object/)
+    await assert.rejects(() => applyInstancesUpdate(settings, NAMESPACE, { section: {} }), /instances array/)
+  })
+  it('rejects duplicate aliases and empty hosts before any write', async () => {
+    const settings = new FakeSettings()
+    await assert.rejects(
+      () => applyInstancesUpdate(settings, NAMESPACE, {
+        section: { instances: [{ alias: 'dev', host: 'a' }, { alias: 'dev', host: 'b' }] },
+      }),
+      /duplicate NebulaGraph instance alias "dev"/,
+    )
+    await assert.rejects(
+      () => applyInstancesUpdate(settings, NAMESPACE, { section: { instances: [{ alias: 'dev', host: '  ' }] } }),
+      /empty host/,
+    )
+    assert.equal(settings.stored(NAMESPACE), undefined)
   })
 })
 
@@ -204,19 +229,20 @@ function fakeRequest(parts: {
 describe('createInstancesApiHandler', () => {
   it('serves instances.get with a view', async () => {
     const settings = new FakeSettings()
-    const handler = createInstancesApiHandler(settings, [])
+    const handler = createInstancesApiHandler(settings, [], NAMESPACE)
     const { res, status, body } = captureResponse()
     await handler(fakeRequest({ headers: { host: '127.0.0.1:3080' } }), res)
     assert.deepEqual(status, [200])
-    const parsed = JSON.parse(body[0] ?? '') as { ok: boolean; value: { value: unknown; revision: number } }
+    const parsed = JSON.parse(body[0] ?? '') as { ok: boolean; value: { value: unknown; revision: number; namespace: string } }
     assert.equal(parsed.ok, true)
     assert.deepEqual(parsed.value.value, { instances: [] })
     assert.equal(parsed.value.revision, 1)
+    assert.equal(parsed.value.namespace, NAMESPACE)
   })
 
   it('serves instances.update and reflects the write', async () => {
     const settings = new FakeSettings()
-    const handler = createInstancesApiHandler(settings, [])
+    const handler = createInstancesApiHandler(settings, [], NAMESPACE)
     const { res, status, body } = captureResponse()
     await handler(fakeRequest({
       url: '/dsh-nebula/api/instances.update',
@@ -228,12 +254,20 @@ describe('createInstancesApiHandler', () => {
     assert.equal(parsed.ok, true)
     assert.equal(parsed.value.value.instances[0].alias, 'prod')
     // The settings provider actually persisted the section.
-    assert.equal((settings.get(String(NEBULA_SETTINGS_NAMESPACE)) as { instances: unknown[] }).instances.length, 1)
+    assert.equal((settings.stored(NAMESPACE) as { instances: unknown[] }).instances.length, 1)
+  })
+
+  it('answers 503 when the plugin has no profile entry (no settings namespace)', async () => {
+    const handler = createInstancesApiHandler(new FakeSettings(), [], undefined)
+    const { res, status, body } = captureResponse()
+    await handler(fakeRequest({ headers: { host: '127.0.0.1:3080' } }), res)
+    assert.deepEqual(status, [503])
+    assert.equal(JSON.parse(body[0] ?? '').error.code, 'settings-unavailable')
   })
 
   it('answers 403 to an untrusted request', async () => {
     const settings = new FakeSettings()
-    const handler = createInstancesApiHandler(settings, [])
+    const handler = createInstancesApiHandler(settings, [], NAMESPACE)
     const { res, status, body } = captureResponse()
     await handler(fakeRequest({ headers: { host: 'evil.example.com' } }), res)
     assert.deepEqual(status, [403])
@@ -242,7 +276,7 @@ describe('createInstancesApiHandler', () => {
 
   it('answers 405 to a non-POST method', async () => {
     const settings = new FakeSettings()
-    const handler = createInstancesApiHandler(settings, [])
+    const handler = createInstancesApiHandler(settings, [], NAMESPACE)
     const { res, status } = captureResponse()
     await handler(fakeRequest({ method: 'GET', headers: { host: '127.0.0.1:3080' } }), res)
     assert.deepEqual(status, [405])
@@ -250,7 +284,7 @@ describe('createInstancesApiHandler', () => {
 
   it('answers 404 to an unknown method', async () => {
     const settings = new FakeSettings()
-    const handler = createInstancesApiHandler(settings, [])
+    const handler = createInstancesApiHandler(settings, [], NAMESPACE)
     const { res, status } = captureResponse()
     await handler(fakeRequest({ url: '/dsh-nebula/api/instances.hack', headers: { host: '127.0.0.1:3080' } }), res)
     assert.deepEqual(status, [404])
@@ -258,7 +292,7 @@ describe('createInstancesApiHandler', () => {
 
   it('answers 400 to a malformed body', async () => {
     const settings = new FakeSettings()
-    const handler = createInstancesApiHandler(settings, [])
+    const handler = createInstancesApiHandler(settings, [], NAMESPACE)
     const { res, status } = captureResponse()
     await handler(fakeRequest({
       url: '/dsh-nebula/api/instances.update',
@@ -271,8 +305,8 @@ describe('createInstancesApiHandler', () => {
   it('answers 409 when the write raced a stale revision', async () => {
     const settings = new FakeSettings()
     // Bump the revision so the client's held revision is stale.
-    await settings.update(String(NEBULA_SETTINGS_NAMESPACE), { instances: [] })
-    const handler = createInstancesApiHandler(settings, [])
+    await settings.update(NAMESPACE, { instances: [] })
+    const handler = createInstancesApiHandler(settings, [], NAMESPACE)
     const { res, status, body } = captureResponse()
     await handler(fakeRequest({
       url: '/dsh-nebula/api/instances.update',
