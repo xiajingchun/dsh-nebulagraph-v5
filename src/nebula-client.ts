@@ -20,7 +20,7 @@ import { decodeResultTable } from './decode/index.ts'
 import type { DecodedTable } from './decode/index.ts'
 
 /** Client software version advertised in `ClientInfo.version`. */
-export const CLIENT_VERSION = 'dsh-nebula/0.1.0'
+export const CLIENT_VERSION = 'dsh-nebula/0.2.0'
 
 /** Wire protocol version declared by nebula-common `common.proto`. */
 export const PROTOCOL_VERSION = '5.0.0'

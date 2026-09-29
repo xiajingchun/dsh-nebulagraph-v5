@@ -109,16 +109,16 @@ command, from any of these sources (the release tarball is the smoothest):
 dsh plugin --profile web add https://github.com/xiajingchun/dsh-nebulagraph-v5/releases/latest/download/dsh-nebula.tgz
 
 # a specific release (versioned, reproducible)
-dsh plugin --profile web add https://github.com/xiajingchun/dsh-nebulagraph-v5/releases/download/v0.1.0/dsh-nebula-0.1.0.tgz
+dsh plugin --profile web add https://github.com/xiajingchun/dsh-nebulagraph-v5/releases/download/v0.2.0/dsh-nebula-0.2.0.tgz
 
 # from the npm registry (once published)
 dsh plugin --profile web add dsh-nebula
 
 # straight from the git repository (builds from source — see note below)
-dsh plugin --profile web add github:xiajingchun/dsh-nebulagraph-v5#v0.1.0
+dsh plugin --profile web add github:xiajingchun/dsh-nebulagraph-v5#v0.2.0
 
 # from a local tarball / checkout while developing
-dsh plugin --profile web add /path/to/dsh-nebula-0.1.0.tgz
+dsh plugin --profile web add /path/to/dsh-nebula-0.2.0.tgz
 dsh plugin --profile web add link:/path/to/dsh-nebula
 ```
 
@@ -150,13 +150,13 @@ uploads both the versioned `dsh-nebula-<version>.tgz` and a stable
 `releases/latest/download/dsh-nebula.tgz` always points at the newest build:
 
 ```sh
-git tag v0.1.0 && git push origin v0.1.0
+git tag v0.2.0 && git push origin v0.2.0
 ```
 
 Manually (same result, no CI):
 
 ```sh
-pnpm build && pnpm pack     # → dsh-nebula-0.1.0.tgz
+pnpm build && pnpm pack     # → dsh-nebula-0.2.0.tgz
 # attach the tarball to a GitHub release (optionally also as dsh-nebula.tgz)
 ```
 
@@ -167,7 +167,7 @@ npm login        # once
 pnpm publish     # runs build + tests via prepublishOnly
 ```
 
-The tarball (`pnpm pack` → `dsh-nebula-0.1.0.tgz`) is fully self-contained:
+The tarball (`pnpm pack` → `dsh-nebula-0.2.0.tgz`) is fully self-contained:
 compiled `lib/`, vendored protos, the packaged `gql-query-generator/` skill
 (including its `.feature` evidence files), `cordis.patch.yml`, README, and
 LICENSE. It was verified by installing the tarball into a fresh throwaway

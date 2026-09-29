@@ -31,7 +31,7 @@ jobs:
           node-version: 24
           cache: pnpm
 
-      # A v0.1.0 tag must pack dsh-nebula-0.1.0.tgz — fail loudly on drift.
+      # A v0.2.0 tag must pack dsh-nebula-0.2.0.tgz — fail loudly on drift.
       - name: Verify tag matches package version
         run: |
           version="$(node -p "require('./package.json').version")"

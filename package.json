@@ -1,6 +1,6 @@
 {
   "name": "dsh-nebula",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "DSH plugin: connect to a NebulaGraph 5.0 server and execute GQL queries, returning results as structured rows plus an ngql-style table render. Bundles the gql-query-generator skill.",
   "keywords": [
     "dsh",
